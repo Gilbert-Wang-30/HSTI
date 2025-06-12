@@ -13,11 +13,11 @@ def load_train_data(pkl_path, batch_size=16, shuffle=False):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 # This function extracts statistical features from a slice of data.
-def extract_stat_features(slice_data):  # shape: (B, 6, C, T)
+def extract_stat_features(slice_data):  # shape: (B, C, 6, T)
     # Convert to numpy for scipy
-    data = slice_data.numpy()  # shape: (B, 6, C, T)
-    B, W, C, T = data.shape
-    data = data.reshape(B * W * C, T)  # reshape to (B*6*C, T)
+    data = slice_data.numpy()  # shape: (B, C, 6, T)
+    B, C, W, T = data.shape
+    data = data.reshape(B * C * 6, T)  # reshape to (B*C*6, T)
 
     features = {
         'mean': np.mean(data, axis=1),
@@ -34,7 +34,7 @@ def extract_stat_features(slice_data):  # shape: (B, 6, C, T)
 
     # Concatenate features along axis 1
     all_feats = np.stack(list(features.values()), axis=1)  # shape: (B*6*C, 10)
-    return all_feats.reshape(B, W, C, -1)  # (B, 6, C, 10)
+    return all_feats.reshape(B, C, W, -1)  # (B, C, 6, 10)
 
 # This function extracts high-level features from the data loader.
 def extract_high_level_features(data_loader):
@@ -47,12 +47,12 @@ def extract_high_level_features(data_loader):
 
     for (x100, x10, x1), labels in data_loader:
         with torch.no_grad():
-            f100 = extract_stat_features(x100)  # (B, 6, 7, 10)
-            f10 = extract_stat_features(x10)    # (B, 6, 2, 10)
-            f1  = extract_stat_features(x1)     # (B, 6, 8, 10)
+            f100 = extract_stat_features(x100)  # (B, 7, 6, 10)
+            f10 = extract_stat_features(x10)    # (B, 2, 6, 10)
+            f1  = extract_stat_features(x1)     # (B, 8, 6, 10)
 
-            combined = np.concatenate([f100, f10, f1], axis=2)  # (B, 6, 17, 10)
-
+            combined = np.concatenate([f100, f10, f1], axis=1)  # (B, 17, 6, 10)
+            print(f"Combined features shape: {combined.shape}")  # should be (B, 17, 6, 10)
             feature_batches.append(torch.tensor(combined, dtype=torch.float32))
             label_batches.append(labels)
           # Save raw inputs for future use
@@ -75,9 +75,9 @@ if __name__ == "__main__":
 
     # Extract high-level features
     feature_batches, label_batches, raw_x100_batches, raw_x10_batches, raw_x1_batches = extract_high_level_features(train_data)
-    # print("Low-level features shape:", (x100.shape, x10.shape, x1.shape))  # should be (B, 6, C, T) for each
-    print("Raw Data Shape:", raw_x100_batches[0].shape, raw_x10_batches[0].shape, raw_x1_batches[0].shape)  # should be (B, 6, C, T) for each
-    print("Extracted features shape:", feature_batches[0].shape)  # should be (N, 6, 17, 10)
+    # print("Low-level features shape:", (x100.shape, x10.shape, x1.shape))  # should be (B, C, 6, T) for each
+    print("Raw Data Shape:", raw_x100_batches[0].shape, raw_x10_batches[0].shape, raw_x1_batches[0].shape)  # should be (B, C, 6, T) for each
+    print("Extracted features shape:", feature_batches[0].shape)  # should be (N, 17, 6, 10)
     print("Extracted labels shape:", label_batches[0].shape)
     # 1. Check number of batches (i.e., list lengths)
     n_batches = len(label_batches)

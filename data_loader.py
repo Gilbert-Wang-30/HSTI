@@ -55,16 +55,19 @@ class data_loader(Dataset):
         
         # Split each into 6 windows of equal length along the time dimension
         windows_100 = [cycle_100[:, j*1000:(j+1)*1000] for j in range(6)]
-        windows_100 = np.stack(windows_100, axis=0)   # shape (6, 7, 1000)
-        windows_10  = [cycle_10[:, j*100:(j+1)*100]   for j in range(6)]
-        windows_10  = np.stack(windows_10, axis=0)    # shape (6, 2, 100)
-        windows_1   = [cycle_1[:, j*10:(j+1)*10]      for j in range(6)]
-        windows_1   = np.stack(windows_1, axis=0)     # shape (6, 8, 10)
-        
+        windows_100 = np.stack(windows_100, axis=1)   # shape (7, 6, 1000)
+
+        windows_10  = [cycle_10[:, j*100:(j+1)*100] for j in range(6)]
+        windows_10  = np.stack(windows_10, axis=1)    # shape (2, 6, 100)
+
+        windows_1   = [cycle_1[:, j*10:(j+1)*10] for j in range(6)]
+        windows_1   = np.stack(windows_1, axis=1)     # shape (8, 6, 10)
+
+            
         # Convert to torch.FloatTensor
-        tensor_100 = torch.from_numpy(windows_100)  # shape (6, 7, 1000)
-        tensor_10  = torch.from_numpy(windows_10)   # shape (6, 2, 100)
-        tensor_1   = torch.from_numpy(windows_1)    # shape (6, 8, 10)
+        tensor_100 = torch.from_numpy(windows_100)  # shape (7, 6, 1000)
+        tensor_10  = torch.from_numpy(windows_10)   # shape (2, 6, 100)
+        tensor_1   = torch.from_numpy(windows_1)    # shape (8, 6, 10)
         
         # print(f"Cycle {idx}: 100Hz shape {tensor_100.shape}, 10Hz shape {tensor_10.shape}, 1Hz shape {tensor_1.shape}")
         
