@@ -65,14 +65,17 @@ class data_loader(Dataset):
         tensor_100 = torch.from_numpy(windows_100)  # shape (6, 7, 1000)
         tensor_10  = torch.from_numpy(windows_10)   # shape (6, 2, 100)
         tensor_1   = torch.from_numpy(windows_1)    # shape (6, 8, 10)
-        print(f"Cycle {idx}: 100Hz shape {tensor_100.shape}, 10Hz shape {tensor_10.shape}, 1Hz shape {tensor_1.shape}")
+        
+        # print(f"Cycle {idx}: 100Hz shape {tensor_100.shape}, 10Hz shape {tensor_10.shape}, 1Hz shape {tensor_1.shape}")
+        
         rul_value  = torch.tensor(self.rul[idx], dtype=torch.float32)  # scalar
-        print(f"Cycle {idx}: RUL value {rul_value.item()}")
-        # Print the first sample of each tensor for debugging
-        print(f"Cycle {idx}: ")
-        print(f"100Hz sample {tensor_100[0, :, :5]}, ")
-        print(f"10Hz sample {tensor_10[0, :, :5]}, ")
-        print(f"1Hz sample {tensor_1[0, :, :5]}")
+        # print(f"Cycle {idx}: RUL value {rul_value.item()}")
+        
+            # Print the first sample of each tensor for debugging
+        # print(f"Cycle {idx}: ")
+        # print(f"100Hz sample {tensor_100[0, :, :5]}, ")
+        # print(f"10Hz sample {tensor_10[0, :, :5]}, ")
+        # print(f"1Hz sample {tensor_1[0, :, :5]}")
         # Return a tuple of the three tensors and the RUL label
         return (tensor_100, tensor_10, tensor_1), rul_value
     
