@@ -52,7 +52,7 @@ def extract_high_level_features(data_loader):
             f1  = extract_stat_features(x1)     # (B, 8, 6, 10)
 
             combined = np.concatenate([f100, f10, f1], axis=1)  # (B, 17, 6, 10)
-            print(f"Combined features shape: {combined.shape}")  # should be (B, 17, 6, 10)
+            # print(f"Combined features shape: {combined.shape}")  # should be (B, 17, 6, 10)
             feature_batches.append(torch.tensor(combined, dtype=torch.float32))
             label_batches.append(labels)
           # Save raw inputs for future use
