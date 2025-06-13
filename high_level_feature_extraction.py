@@ -64,35 +64,20 @@ def extract_high_level_features(data_loader):
 
 if __name__ == "__main__":
     train_path = "/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data/train.pkl"
-    train_data = load_train_data(train_path, batch_size=16, shuffle=True)
-
-    # Iterate through one batch to check shapes
-    for i, ((x100, x10, x1), y) in enumerate(train_data):
-        print(f"Batch {i}:")
-        print(f"  100Hz shape: {x100.shape}, 10Hz shape: {x10.shape}, 1Hz shape: {x1.shape}")
-        print(f"  Labels shape: {y.shape}")
-        break  # only load one batch
-
-    # Extract high-level features
+    train_data = load_train_data(train_path, batch_size=1, shuffle=False)
     feature_batches, label_batches, raw_x100_batches, raw_x10_batches, raw_x1_batches = extract_high_level_features(train_data)
-    # print("Low-level features shape:", (x100.shape, x10.shape, x1.shape))  # should be (B, C, 6, T) for each
-    print("Raw Data Shape:", raw_x100_batches[0].shape, raw_x10_batches[0].shape, raw_x1_batches[0].shape)  # should be (B, C, 6, T) for each
-    print("Extracted features shape:", feature_batches[0].shape)  # should be (N, 17, 6, 10)
-    print("Extracted labels shape:", label_batches[0].shape)
-    # 1. Check number of batches (i.e., list lengths)
-    n_batches = len(label_batches)
-    assert len(feature_batches) == n_batches, "Mismatch in number of feature batches"
-    assert len(raw_x100_batches) == n_batches, "Mismatch in number of x100 batches"
-    assert len(raw_x10_batches) == n_batches, "Mismatch in number of x10 batches"
-    assert len(raw_x1_batches) == n_batches, "Mismatch in number of x1 batches"
+    # Squeeze batches axis
+    # Convert to numpy and squeeze batch dim
+    X_raw = [f.squeeze(0).numpy() for f in feature_batches]  # shape: (17, 6, 10) each
+    y_raw = [l.squeeze(0).item() for l in label_batches]      # scalar RUL per sample
 
-    # 2. Check sample size within each batch
-    for i in range(n_batches):
-        B = label_batches[i].shape[0]
-        assert feature_batches[i].shape[0] == B, f"Batch {i}: feature-label size mismatch"
-        assert raw_x100_batches[i].shape[0] == B, f"Batch {i}: x100-label size mismatch"
-        assert raw_x10_batches[i].shape[0] == B, f"Batch {i}: x10-label size mismatch"
-        assert raw_x1_batches[i].shape[0] == B, f"Batch {i}: x1-label size mismatch"
+    # Transform all to (6, 170) format
+    X_transposed = [x.transpose(1, 0, 2).reshape(6, 170) for x in X_raw]  # shape: (6, 170) per sample
 
-    print(f"[OK] Extracted {n_batches} batches — each batch is consistent.")
-    print("Feature extraction complete. Ready for next steps.")
+    print(f"X_transposed shape: {len(X_transposed)} samples, each of shape {X_transposed[0].shape}")
+    # Save to pickle
+    output_path = "/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data/train_features.pkl"
+    with open(output_path, "wb") as f:
+        pickle.dump((X_transposed, y_raw), f)
+
+    print(f"[INFO] Saved {len(X_transposed)} samples in (6, 170) format to {output_path}")
