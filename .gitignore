@@ -4,3 +4,4 @@ processed_data/
 noTears/
 heatmaps/
 __pycache__/
+*.pyc
