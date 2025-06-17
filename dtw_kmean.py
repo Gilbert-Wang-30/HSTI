@@ -38,6 +38,7 @@ def dtw_kmeans_cluster(sensor_series, n_clusters=2, max_iter=10):
     labels = [None] * N  # cluster labels for sensors
     
     for iteration in range(max_iter):
+        print(f"[DEBUG] Iteration {iteration + 1}/{max_iter}...")
         # 3. Assignment Step: assign each series to nearest centroid by DTW distance
         labels_changed = False
         new_labels = []
@@ -92,33 +93,31 @@ def compute_co_occurrence_matrix():
     co_occ_matrix = np.zeros((17, 17), dtype=int)
 
     # Process the first 20 samples (or all samples if fewer than 20)
-    for idx, sample in enumerate(data):
-        print(f"[INFO] Processing sample {idx}...")
+    for i in range(20):
+        print(f"[INFO] Processing sample {i}...")
 
-        if idx >= 20:
-            break
-        (x100, x10, x1), label = sample  # unpack the sample tuple
+        (x100, x10, x1), label = data[i]  # unpack the sample tuple
         try:
             # Flatten each sensor's 6 time windows into one 1D time series
             sensor_series = []
             # Flatten 100Hz sensors (7 sensors, each 6x1000 array -> length 6000)
-            for s in range(x100.shape[0]):  # x100 shape is (7, 6, 1000)
-                series = x100[s].reshape(-1)   # flatten 6*1000
+            for s in range(7):  # x100 shape is (7, 6, 1000)
+                series = x100[s].reshape(-1).numpy()   # flatten 6*1000
                 sensor_series.append(series)
             # Flatten 10Hz sensors (2 sensors, each 6x100 array -> length 600)
-            for s in range(x10.shape[0]):   # x10 shape is (2, 6, 100)
-                series = x10[s].reshape(-1)   # flatten 6*100
+            for s in range(2):   # x10 shape is (2, 6, 100)
+                series = x10[s].reshape(-1).numpy()   # flatten 6*100
                 sensor_series.append(series)
             # Flatten 1Hz sensors (8 sensors, each 6x10 array -> length 60)
-            for s in range(x1.shape[0]):    # x1 shape is (8, 6, 10)
-                series = x1[s].reshape(-1)    # flatten 6*10
+            for s in range(8):    # x1 shape is (8, 6, 10)
+                series = x1[s].reshape(-1).numpy()    # flatten 6*10
                 sensor_series.append(series)
 
             # Cluster the 17 sensor series using DTW-based k-means
-            labels = dtw_kmeans_cluster(sensor_series, n_clusters=8, max_iter=10)
+            labels, centers, A = dtw_kmeans_cluster(sensor_series, n_clusters=8, max_iter=10)
         except Exception as e:
             # Handle any error (e.g., clustering failure) gracefully
-            print(f"Sample {idx}: error during clustering - {e}. Skipping this sample.")
+            print(f"Sample {i}: error during clustering - {e}. Skipping this sample.")
             continue
 
         # Update co-occurrence counts for sensors in the same cluster
