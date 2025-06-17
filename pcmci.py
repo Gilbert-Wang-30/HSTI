@@ -11,6 +11,7 @@ To adjust, modify the MAX_LAG and SIGNIFICANCE_LEVEL variables below.
 import numpy as np
 import pickle
 import os
+import argparse
 
 # Import tigramite PCMCI and independence test
 try:
@@ -27,11 +28,21 @@ except ImportError as e:
     raise ImportError("Function extract_high_level_features not found. "
                       "Ensure high_level_feature_extraction.py is in the path.") from e
 
+
+
+parser = argparse.ArgumentParser(description="PCMCI causal discovery over selected cycles")
+parser.add_argument("--start", type=int, required=True, help="Start cycle index")
+parser.add_argument("--end", type=int, required=True, help="End cycle index (inclusive)")
+parser.add_argument("--lag", type=int, default=1, help="Max lag to consider (default=1)")
+args = parser.parse_args()
+
+
+
 # Parameters (adjustable)
-START_CYCLE = 0
-END_CYCLE = 209
+START_CYCLE = args.start
+END_CYCLE = args.end
+MAX_LAG = args.lag
 PATH_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"
-MAX_LAG = 0                 # Maximum time lag to consider (default 1)
 SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01)
 
 # 1. Feature extraction

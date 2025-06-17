@@ -138,47 +138,24 @@ def compute_co_occurrence_matrix():
     binary_matrix = (co_occ_matrix >= 16).astype(int)
     print("\nBinary co-occurrence matrix (1 if co-occurred in >=16 samples, else 0):")
     print(binary_matrix)
+
+    return binary_matrix, co_occ_matrix
+
 # Example usage (assuming sensor_series is a list of 17 arrays, one per sensor):
 # labels, centers, A = dtw_kmeans_cluster(sensor_series, n_clusters=3, max_iter=10)
 if __name__ == "__main__":
+    import os
     import pickle
     from data_loader import data_loader
-    # Path to your processed training set (pkl)
-    pkl_path = "/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data/train.pkl"
-    
-    # Load 1 batch of raw data (x100, x10, x1) from pkl
-    with open(pkl_path, "rb") as f:
-        dataset = pickle.load(f)
 
-    for i in range(100):
-        (x100, x10, x1), y = dataset[i]
-        # print(f"data set: {i}, target: {y.item()}")
+    result = compute_co_occurrence_matrix()
+    if result is not None:
+        binary_matrix, full_matrix = result
 
+    os.makedirs("co-kmean-cluster", exist_ok=True)
+    with open("co-kmean-cluster/binary_co_matrix.pkl", "wb") as f:
+        pickle.dump(binary_matrix, f)
+    with open("co-kmean-cluster/full_co_matrix.pkl", "wb") as f:
+        pickle.dump(full_matrix, f)
 
-    compute_co_occurrence_matrix()
-    # Choose the first sample (index 0)
-    s = 99
-    print(s)
-    (x100, x10, x1), y = dataset[s]  # shapes: (7, 6, 1000), (2, 6, 100), (8, 6, 10)
-
-    # Flatten and concatenate all sensor channels across the 6 time windows
-    sensor_series = []
-    for i in range(7):  # 100Hz
-        sensor_series.append(x100[i].reshape(-1).numpy())
-    for i in range(2):  # 10Hz
-        sensor_series.append(x10[i].reshape(-1).numpy())
-    for i in range(8):  # 1Hz
-        sensor_series.append(x1[i].reshape(-1).numpy())
-
-    # Cluster the 17 sensors using DTW-KMeans
-    labels, centers, A = dtw_kmeans_cluster(sensor_series, n_clusters=8, max_iter=10)
-
-    # Print basic info
-    print("\nCluster labels for 17 sensors:")
-    print(labels)
-    print("\nAdjacency matrix A (1 = same cluster):")
-    print(A.astype(int))
-    print("\nCluster center lengths:")
-    for i, center in enumerate(centers):
-        print(f"  Cluster {i}: length {len(center)}")
-    print("Target RUL value:", y.item())
+    print("[INFO] Saved binary and full co-occurrence matrices to 'co-kmean-cluster/'")
