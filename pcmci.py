@@ -10,6 +10,7 @@ To adjust, modify the MAX_LAG and SIGNIFICANCE_LEVEL variables below.
 # Necessary imports
 import numpy as np
 import pickle
+import os
 
 # Import tigramite PCMCI and independence test
 try:
@@ -27,10 +28,10 @@ except ImportError as e:
                       "Ensure high_level_feature_extraction.py is in the path.") from e
 
 # Parameters (adjustable)
-START_CYCLE = 0
-END_CYCLE = 209
+START_CYCLE = 1464
+END_CYCLE = 1663
 PATH_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"
-MAX_LAG = 1                 # Maximum time lag to consider (default 1)
+MAX_LAG = 0                 # Maximum time lag to consider (default 1)
 SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01)
 
 # 1. Feature extraction
@@ -54,37 +55,61 @@ pcmci = PCMCI(dataframe=dataframe, cond_ind_test=parcorr_test, verbosity=0)
 
 # Run PCMCI algorithm with specified lag and significance threshold
 print(f"Running PCMCI with tau_max={MAX_LAG} and alpha={SIGNIFICANCE_LEVEL}...")
-results = pcmci.run_pcmci(tau_min=1, tau_max=MAX_LAG, pc_alpha=None, alpha_level=SIGNIFICANCE_LEVEL)
+tau_min = 0 if MAX_LAG == 0 else 1
+results = pcmci.run_pcmci(tau_min=tau_min, tau_max=MAX_LAG, pc_alpha=None, alpha_level=SIGNIFICANCE_LEVEL)
 p_matrix, val_matrix = results['p_matrix'], results['val_matrix']
 
 # 3. Construct adjacency matrix (binary) from p_matrix and print results
-# Note: If multiple lags, p_matrix and val_matrix have shape (N, N, tau_max+1) including lag0.
-# We consider lags 1..MAX_LAG. We'll create adjacency matrices for each lag.
-adjacency_matrices = (p_matrix[..., 1:MAX_LAG+1] <= SIGNIFICANCE_LEVEL).astype(int)
-strength_matrices  = val_matrix[..., 1:MAX_LAG+1]
+# Note: If multiple lags, p_matrix and val_matrix have shape (N, N, tau_max+1) including lag 0.
+# We consider lags 0, 1..MAX_LAG. We'll create adjacency matrices for each lag.
+# 3. Construct and save adjacency matrix/matrices
+OUT_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/pcmci"
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# Print adjacency and strength matrices
-if MAX_LAG == 1:
-    # For single lag, adjacency_matrices and strength_matrices are 3D with size 1 in last axis
-    adj_matrix = adjacency_matrices[..., 0]  # shape (N, N)
-    strength_matrix = strength_matrices[..., 0]  # shape (N, N)
-    print("Causal adjacency matrix (lag 1, binary 0/1):")
+if MAX_LAG == 0:
+    # Instantaneous causality (lag 0 only)
+    adj_matrix = (p_matrix[..., 0] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_matrix = val_matrix[..., 0]
+    print("\nCausal adjacency matrix (lag 0, binary 0/1):")
     print(adj_matrix)
-    print("Strength matrix for lag 1 (partial correlation values):")
+    print("\nStrength matrix for lag 0 (partial correlation values):")
     print(strength_matrix)
-else:
-    # For multiple lags, iterate and print each matrix
-    num_vars = adjacency_matrices.shape[0]
-    for tau in range(1, MAX_LAG+1):
-        adj_mat_tau = adjacency_matrices[..., tau-1]
-        strength_mat_tau = strength_matrices[..., tau-1]
-        print(f"\nCausal adjacency matrix for lag {tau}:")
-        print(adj_mat_tau)
-        print(f"Strength matrix for lag {tau}:")
-        print(strength_mat_tau)
 
-# Save the binary adjacency matrix (or matrices) to a .pkl file
-outfile = f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}.pkl"
-with open(outfile, "wb") as f:
-    pickle.dump(adjacency_matrices, f)
-print(f"\nBinary adjacency matrix saved to {outfile}")
+    # Save matrix
+    outfile = os.path.join(OUT_DIR, f"pcmci_instant_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag0.pkl")
+    with open(outfile, "wb") as f:
+        pickle.dump(adj_matrix, f)
+
+elif MAX_LAG == 1:
+    # Lag 1 only
+    adj_matrix = (p_matrix[..., 1] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_matrix = val_matrix[..., 1]
+    print("\nCausal adjacency matrix (lag 1, binary 0/1):")
+    print(adj_matrix)
+    print("\nStrength matrix for lag 1 (partial correlation values):")
+    print(strength_matrix)
+
+    # Save matrix
+    outfile = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag1.pkl")
+    with open(outfile, "wb") as f:
+        pickle.dump(adj_matrix, f)
+
+else:
+    # Multi-lag: save all lags 1..MAX_LAG
+    adjacency_matrices = (p_matrix[..., 1:MAX_LAG+1] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_matrices = val_matrix[..., 1:MAX_LAG+1]
+
+    for tau in range(1, MAX_LAG + 1):
+        adj_tau = adjacency_matrices[..., tau - 1]
+        strength_tau = strength_matrices[..., tau - 1]
+        print(f"\nCausal adjacency matrix for lag {tau}:")
+        print(adj_tau)
+        print(f"Strength matrix for lag {tau}:")
+        print(strength_tau)
+
+        # Save each tau-lag matrix separately
+        out_tau = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag{tau}.pkl")
+        with open(out_tau, "wb") as f:
+            pickle.dump(adj_tau, f)
+
+print(f"Adjacency matrices saved under: {OUT_DIR}")

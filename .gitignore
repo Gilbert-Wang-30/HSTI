@@ -5,3 +5,4 @@ noTears/
 heatmaps/
 __pycache__/
 *.pyc
+pcmci/
