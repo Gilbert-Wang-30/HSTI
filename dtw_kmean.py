@@ -153,9 +153,9 @@ if __name__ == "__main__":
         binary_matrix, full_matrix = result
 
     os.makedirs("co-kmean-cluster", exist_ok=True)
-    with open("co-kmean-cluster/binary_co_matrix.pkl", "wb") as f:
+    with open("/home/wangyuxiao/project/gilbert_copy/HSTI/co-kmean-cluster/binary_co_matrix.pkl", "wb") as f:
         pickle.dump(binary_matrix, f)
-    with open("co-kmean-cluster/full_co_matrix.pkl", "wb") as f:
+    with open("/home/wangyuxiao/project/gilbert_copy/HSTI/co-kmean-cluster/full_co_matrix.pkl", "wb") as f:
         pickle.dump(full_matrix, f)
 
     print("[INFO] Saved binary and full co-occurrence matrices to 'co-kmean-cluster/'")
