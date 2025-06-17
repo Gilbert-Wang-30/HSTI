@@ -20,8 +20,11 @@ def dtw_kmeans_cluster(sensor_series, n_clusters=2, max_iter=10):
     N = len(sensor_series)
     # 1. Compute pairwise DTW distance matrix (optional: for analysis or initialization)
     dtw_dist_matrix = np.zeros((N, N))
+    print(f"[DEBUG] Computing DTW distance matrix for {N} series...")
+
     for i in range(N):
         for j in range(i+1, N):
+            print(f"    [DTW] Computing distance between series {i} and {j}")
             # Compute DTW distance between series i and j
             dist_ij = dtw(sensor_series[i], sensor_series[j])
             dtw_dist_matrix[i, j] = dist_ij
@@ -75,6 +78,64 @@ def dtw_kmeans_cluster(sensor_series, n_clusters=2, max_iter=10):
     
     return labels, centers, A
 
+
+def compute_co_occurrence_matrix():
+    # Load the dataset from the pickle file
+    try:
+        with open('/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data/train.pkl', 'rb') as f:
+            data = pickle.load(f)
+    except Exception as e:
+        print(f"Failed to load dataset: {e}")
+        return
+
+    # Initialize a 17x17 co-occurrence matrix with zeros
+    co_occ_matrix = np.zeros((17, 17), dtype=int)
+
+    # Process the first 20 samples (or all samples if fewer than 20)
+    for idx, sample in enumerate(data):
+        print(f"[INFO] Processing sample {idx}...")
+
+        if idx >= 20:
+            break
+        (x100, x10, x1), label = sample  # unpack the sample tuple
+        try:
+            # Flatten each sensor's 6 time windows into one 1D time series
+            sensor_series = []
+            # Flatten 100Hz sensors (7 sensors, each 6x1000 array -> length 6000)
+            for s in range(x100.shape[0]):  # x100 shape is (7, 6, 1000)
+                series = x100[s].reshape(-1)   # flatten 6*1000
+                sensor_series.append(series)
+            # Flatten 10Hz sensors (2 sensors, each 6x100 array -> length 600)
+            for s in range(x10.shape[0]):   # x10 shape is (2, 6, 100)
+                series = x10[s].reshape(-1)   # flatten 6*100
+                sensor_series.append(series)
+            # Flatten 1Hz sensors (8 sensors, each 6x10 array -> length 60)
+            for s in range(x1.shape[0]):    # x1 shape is (8, 6, 10)
+                series = x1[s].reshape(-1)    # flatten 6*10
+                sensor_series.append(series)
+
+            # Cluster the 17 sensor series using DTW-based k-means
+            labels = dtw_kmeans_cluster(sensor_series, n_clusters=8, max_iter=10)
+        except Exception as e:
+            # Handle any error (e.g., clustering failure) gracefully
+            print(f"Sample {idx}: error during clustering - {e}. Skipping this sample.")
+            continue
+
+        # Update co-occurrence counts for sensors in the same cluster
+        # Ensure we count each pair once per sample
+        for i in range(len(labels)):
+            for j in range(len(labels)):
+                if labels[i] == labels[j]:
+                    co_occ_matrix[i, j] += 1
+
+    # Print the co-occurrence matrix
+    print("Co-occurrence matrix (counts of co-clustering in 20 samples):")
+    print(co_occ_matrix)
+
+    # Convert to binary matrix with threshold 80% (>=16 out of 20)
+    binary_matrix = (co_occ_matrix >= 16).astype(int)
+    print("\nBinary co-occurrence matrix (1 if co-occurred in >=16 samples, else 0):")
+    print(binary_matrix)
 # Example usage (assuming sensor_series is a list of 17 arrays, one per sensor):
 # labels, centers, A = dtw_kmeans_cluster(sensor_series, n_clusters=3, max_iter=10)
 if __name__ == "__main__":
@@ -91,6 +152,8 @@ if __name__ == "__main__":
         (x100, x10, x1), y = dataset[i]
         # print(f"data set: {i}, target: {y.item()}")
 
+
+    compute_co_occurrence_matrix()
     # Choose the first sample (index 0)
     s = 99
     print(s)

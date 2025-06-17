@@ -29,19 +29,22 @@ def plot_heatmap(matrix, output_path, title="NOTears Adjacency Matrix Heatmap"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize and Save NOTears Adjacency Matrix Heatmap")
     parser.add_argument("--index", type=int, required=True, help="Index of the matrix to visualize")
-    parser.add_argument("--dir", type=str, default="noTears", help="Directory containing .pkl file")
+    parser.add_argument("--dir", type=str, default="pcmci", help="Directory containing PCMCI .pkl file")
     parser.add_argument("--outdir", type=str, default="heatmaps", help="Directory to save heatmap PNG")
 
     args = parser.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
-    file_path = os.path.join(args.dir, f"notears_result_index_{args.index}.pkl")
+    file_path = os.path.join(args.dir, f"pcmci_adj_matrix_cycles_0_to_{args.index}.pkl")
     output_img = os.path.join(args.outdir, f"heatmap_index_{args.index}.png")
 
     try:
         W = load_matrix(file_path)
+        if W.ndim == 3:
+            W = W[..., 0]  # Extract lag-1 binary adjacency matrix
+
         print(f"[INFO] Loaded matrix of shape {W.shape} from: {file_path}")
-        plot_heatmap(W, output_img, title=f"NOTears DAG - Index {args.index}")
+        plot_heatmap(W, output_img, title=f"PCMCI Causal Graph (Lag 1) - Up to Cycle {args.index}")
         print(f"[INFO] Heatmap saved to: {output_img}")
     except Exception as e:
         print(f"[ERROR] {e}")
