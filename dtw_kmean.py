@@ -20,11 +20,9 @@ def dtw_kmeans_cluster(sensor_series, n_clusters=2, max_iter=10):
     N = len(sensor_series)
     # 1. Compute pairwise DTW distance matrix (optional: for analysis or initialization)
     dtw_dist_matrix = np.zeros((N, N))
-    print(f"[DEBUG] Computing DTW distance matrix for {N} series...")
 
     for i in range(N):
         for j in range(i+1, N):
-            print(f"    [DTW] Computing distance between series {i} and {j}")
             # Compute DTW distance between series i and j
             dist_ij = dtw(sensor_series[i], sensor_series[j])
             dtw_dist_matrix[i, j] = dist_ij
@@ -115,6 +113,11 @@ def compute_co_occurrence_matrix():
 
             # Cluster the 17 sensor series using DTW-based k-means
             labels, centers, A = dtw_kmeans_cluster(sensor_series, n_clusters=8, max_iter=10)
+            print(f"\nCluster labels for {i}:")
+            print(labels)
+            print(f"\nAdjacency matrix A {i}: ")
+            print(A.astype(int))
+
         except Exception as e:
             # Handle any error (e.g., clustering failure) gracefully
             print(f"Sample {i}: error during clustering - {e}. Skipping this sample.")

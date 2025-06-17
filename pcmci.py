@@ -28,8 +28,8 @@ except ImportError as e:
                       "Ensure high_level_feature_extraction.py is in the path.") from e
 
 # Parameters (adjustable)
-START_CYCLE = 1464
-END_CYCLE = 1663
+START_CYCLE = 0
+END_CYCLE = 209
 PATH_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"
 MAX_LAG = 0                 # Maximum time lag to consider (default 1)
 SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01)
@@ -38,10 +38,15 @@ SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01
 print(f"Extracting high-level features for cycles {START_CYCLE} to {END_CYCLE}...")
 features, extracted_rul = extract_high_level_features(data_dir=PATH_DIR, start_idx=START_CYCLE, end_idx=END_CYCLE)
 
-# Remove features that are constant or contain NaNs
-valid_cols = (np.std(features, axis=0) > 1e-6) & (~np.isnan(features).any(axis=0))
-features = features[:, valid_cols]
-print(f"[Cleanup] Removed {np.sum(~valid_cols)} constant/NaN features → New shape: {features.shape}")
+# === Clean up feature matrix and track original indices ===
+N_total = features.shape[1]
+valid_mask = (np.std(features, axis=0) > 1e-6) & (~np.isnan(features).any(axis=0))
+kept_indices = np.where(valid_mask)[0].tolist()
+removed_indices = np.where(~valid_mask)[0].tolist()
+features_clean = features[:, kept_indices]
+
+print(f"[Cleanup] Removed {len(removed_indices)} features → {features_clean.shape[1]} remaining.")
+features = features_clean
 
 # Expect features shape to be (time_points, num_features), e.g., (1260, 170)
 print(f"Feature matrix shape: {features.shape}")
@@ -68,48 +73,79 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 if MAX_LAG == 0:
     # Instantaneous causality (lag 0 only)
-    adj_matrix = (p_matrix[..., 0] <= SIGNIFICANCE_LEVEL).astype(int)
-    strength_matrix = val_matrix[..., 0]
-    print("\nCausal adjacency matrix (lag 0, binary 0/1):")
-    print(adj_matrix)
-    print("\nStrength matrix for lag 0 (partial correlation values):")
-    print(strength_matrix)
+    adj_small = (p_matrix[..., 0] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_small = val_matrix[..., 0]
+    # 2. Reconstruct full 170×170 matrix with zeros at removed indices
+    adj_matrix = np.zeros((N_total, N_total), dtype=int)
+    strength_matrix = np.zeros((N_total, N_total), dtype=float)
+
+    for i, orig_i in enumerate(kept_indices):
+        for j, orig_j in enumerate(kept_indices):
+            adj_matrix[orig_i, orig_j] = adj_small[i, j]
+            strength_matrix[orig_i, orig_j] = strength_small[i, j]
+
 
     # Save matrix
-    outfile = os.path.join(OUT_DIR, f"pcmci_instant_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag0.pkl")
-    with open(outfile, "wb") as f:
+    adj_matrix_path = os.path.join(OUT_DIR, f"pcmci_instant_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag0.pkl")
+    strength_matrix_path = os.path.join(OUT_DIR, f"pcmci_instant_strength_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag0.pkl")
+    # Save the adjacency matrix to disk
+    with open(adj_matrix_path, 'wb') as f:
         pickle.dump(adj_matrix, f)
+
+    # Save the strength matrix to disk
+    with open(strength_matrix_path, 'wb') as f:
+        pickle.dump(strength_matrix, f)
+
 
 elif MAX_LAG == 1:
     # Lag 1 only
-    adj_matrix = (p_matrix[..., 1] <= SIGNIFICANCE_LEVEL).astype(int)
-    strength_matrix = val_matrix[..., 1]
-    print("\nCausal adjacency matrix (lag 1, binary 0/1):")
-    print(adj_matrix)
-    print("\nStrength matrix for lag 1 (partial correlation values):")
-    print(strength_matrix)
+    adj_small = (p_matrix[..., 1] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_small = val_matrix[..., 1]
+        # 2. Reconstruct full 170×170 matrix with zeros at removed indices
+    adj_matrix = np.zeros((N_total, N_total), dtype=int)
+    strength_matrix = np.zeros((N_total, N_total), dtype=float)
+
+    for i, orig_i in enumerate(kept_indices):
+        for j, orig_j in enumerate(kept_indices):
+            adj_matrix[orig_i, orig_j] = adj_small[i, j]
+            strength_matrix[orig_i, orig_j] = strength_small[i, j]
+
 
     # Save matrix
-    outfile = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag1.pkl")
-    with open(outfile, "wb") as f:
+    adj_matrix_path = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag1.pkl")
+    strength_matrix_path = os.path.join(OUT_DIR, f"pcmci_strength_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag1.pkl")
+    # Save the adjacency matrix to disk 
+    with open(adj_matrix_path, 'wb') as f:
         pickle.dump(adj_matrix, f)
+
+    # Save the strength matrix to disk
+    with open(strength_matrix_path, 'wb') as f:
+        pickle.dump(strength_matrix, f)
 
 else:
     # Multi-lag: save all lags 1..MAX_LAG
-    adjacency_matrices = (p_matrix[..., 1:MAX_LAG+1] <= SIGNIFICANCE_LEVEL).astype(int)
-    strength_matrices = val_matrix[..., 1:MAX_LAG+1]
+    adjacency_small = (p_matrix[..., 1:MAX_LAG+1] <= SIGNIFICANCE_LEVEL).astype(int)
+    strength_small = val_matrix[..., 1:MAX_LAG+1]
+
+    adj_matrix = np.zeros((N_total, N_total, MAX_LAG), dtype=int)
+    strength_matrix = np.zeros((N_total, N_total, MAX_LAG), dtype=float)
 
     for tau in range(1, MAX_LAG + 1):
-        adj_tau = adjacency_matrices[..., tau - 1]
-        strength_tau = strength_matrices[..., tau - 1]
-        print(f"\nCausal adjacency matrix for lag {tau}:")
-        print(adj_tau)
-        print(f"Strength matrix for lag {tau}:")
-        print(strength_tau)
+        adj_tau = adjacency_small[..., tau - 1]
+        strength_tau = strength_small[..., tau - 1]
+            # 2. Reconstruct full 170×170 matrix with zeros at removed indices
+
+        for i, orig_i in enumerate(kept_indices):
+            for j, orig_j in enumerate(kept_indices):
+                adj_matrix[orig_i, orig_j, tau - 1] = adj_tau[i, j]
+                strength_matrix[orig_i, orig_j, tau - 1] = strength_tau[i, j]
 
         # Save each tau-lag matrix separately
-        out_tau = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag{tau}.pkl")
-        with open(out_tau, "wb") as f:
-            pickle.dump(adj_tau, f)
+        out_adj = os.path.join(OUT_DIR, f"pcmci_adj_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag{tau}.pkl")
+        out_strength = os.path.join(OUT_DIR, f"pcmci_strength_matrix_cycles_{START_CYCLE}_to_{END_CYCLE}_lag{tau}.pkl")
+        with open(out_adj, "wb") as f:
+            pickle.dump(adj_matrix[..., tau - 1], f)
+        with open(out_strength, "wb") as f:
+            pickle.dump(strength_matrix[..., tau - 1], f)
 
 print(f"Adjacency matrices saved under: {OUT_DIR}")

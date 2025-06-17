@@ -38,9 +38,9 @@ if __name__ == "__main__":
     os.makedirs(args.outdir, exist_ok=True)
 
     if args.lag == 0:
-        filename = f"pcmci_instant_adj_matrix_cycles_{args.start}_to_{args.end}_lag0.pkl"
+        filename = f"pcmci_instant_strength_matrix_cycles_{args.start}_to_{args.end}_lag0.pkl"
     else:
-        filename = f"pcmci_adj_matrix_cycles_{args.start}_to_{args.end}_lag{args.lag}.pkl"
+        filename = f"pcmci_strength_matrix_cycles_{args.start}_to_{args.end}_lag{args.lag}.pkl"
 
     file_path = os.path.join(args.dir, filename)
     output_img = os.path.join(args.outdir, f"heatmap_cycles_{args.start}_to_{args.end}_lag{args.lag}.png")
@@ -49,7 +49,7 @@ if __name__ == "__main__":
         W = load_matrix(file_path)
         print(f"[INFO] Loaded matrix of shape {W.shape} from: {file_path}")
         plot_heatmap(W, output_img,
-                     title=f"PCMCI Causal Graph (Lag {args.lag}) - Cycles {args.start} to {args.end}")
+                     title=f"PCMCI Strength Graph (Lag {args.lag}) - Cycles {args.start} to {args.end}")
         print(f"[INFO] Heatmap saved to: {output_img}")
     except Exception as e:
         print(f"[ERROR] {e}")
