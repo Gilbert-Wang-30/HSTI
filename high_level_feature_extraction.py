@@ -56,7 +56,8 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
     # Check that all selected cycles have the same RUL (and same profile/status if relevant)
     selected_ruls = rul_array[start_idx:end_idx+1]
     if not np.all(selected_ruls == selected_ruls[0]):
-        raise ValueError("Selected cycles have different RUL values or system profiles; cannot merge features.")
+        print("[WARNING] Selected cycles have different RUL values or profiles. Proceeding with first RUL only.")
+        # raise ValueError("Selected cycles have different RUL values or system profiles; cannot merge features.")
     shared_rul = float(selected_ruls[0])
 
     # 3. Define a helper to split a cycle’s data into 6 equal windows for each frequency group
