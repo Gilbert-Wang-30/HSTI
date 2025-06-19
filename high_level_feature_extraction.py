@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import torch
 from scipy.stats import skew, kurtosis
 
 def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
@@ -140,6 +141,59 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
     # 7. Return the feature matrix and the shared RUL value
     return merged_matrix, shared_rul
 
+
+def extract_cycle_features(
+    tensor_100: torch.FloatTensor,
+    tensor_10: torch.FloatTensor,
+    tensor_1: torch.FloatTensor,
+    rul_value: float
+):
+    """
+    Extract statistical features from a single cycle's tensor data (already windowed).
+    
+    Args:
+        tensor_100: Tensor of shape (7, 6, 1000) for 100Hz sensors.
+        tensor_10:  Tensor of shape (2, 6, 100)  for 10Hz sensors.
+        tensor_1:   Tensor of shape (8, 6, 10)   for 1Hz sensors.
+        rul_value:  Remaining Useful Life (float) for this cycle.
+
+    Returns:
+        features_matrix: np.ndarray of shape (6, 170)
+        rul_value: same as input
+    """
+    def compute_window_features(window_data: np.ndarray) -> np.ndarray:
+        C, W, T = window_data.shape
+        flat = window_data.reshape(C * W, T)
+        feat_mean = np.mean(flat, axis=1)
+        feat_var  = np.var(flat, axis=1)
+        feat_std  = np.std(flat, axis=1)
+        feat_skew = skew(flat, axis=1)
+        feat_kurt = kurtosis(flat, axis=1)
+        feat_max  = np.max(flat, axis=1)
+        feat_min  = np.min(flat, axis=1)
+        feat_pulse = np.sum(np.abs(np.diff(flat, axis=1)) > 0, axis=1)
+        feat_peak  = np.max(np.abs(flat), axis=1)
+        feat_amp   = feat_max - feat_min
+        all_features = np.stack([feat_mean, feat_var, feat_std, feat_skew, feat_kurt,
+                                 feat_max, feat_min, feat_pulse, feat_peak, feat_amp], axis=1)
+        return all_features.reshape(C, W, -1)
+
+    # Convert torch tensors to numpy arrays
+    np_100 = tensor_100.numpy()  # shape (7, 6, 1000)
+    np_10  = tensor_10.numpy()   # shape (2, 6, 100)
+    np_1   = tensor_1.numpy()    # shape (8, 6, 10)
+
+    # Compute features
+    feats_100 = compute_window_features(np_100)  # (7, 6, 10)
+    feats_10  = compute_window_features(np_10)   # (2, 6, 10)
+    feats_1   = compute_window_features(np_1)    # (8, 6, 10)
+
+    # Combine and reshape to (6, 170)
+    combined = np.concatenate([feats_100, feats_10, feats_1], axis=0)
+    features_matrix = combined.transpose(1, 0, 2).reshape(6, 170)
+
+    return features_matrix, rul_value
+
 # Example usage (not part of the module, shown for clarity):
 # data_dir = "path/to/sensor_data_folder"
 # X, rul_val = extract_high_level_features(data_dir, start_idx=0, end_idx=9)
@@ -147,7 +201,7 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
 # print("Shared RUL value:", rul_val)
 if __name__ == "__main__":
     # Example usage
-    data_dir = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"  # Replace with actual path
+    data_dir = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"  
     start_idx = 0
     end_idx = 209  # Extract features for the first 210 cycles (0-209)
 
