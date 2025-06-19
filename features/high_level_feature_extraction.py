@@ -201,7 +201,10 @@ def extract_cycle_features(
 # print("Shared RUL value:", rul_val)
 if __name__ == "__main__":
     # Example usage
-    data_dir = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"  
+    from pathlib import Path
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    data_dir = BASE_DIR / "data" / "raw"
+
     start_idx = 0
     end_idx = 209  # Extract features for the first 210 cycles (0-209)
 

@@ -13,6 +13,13 @@ import pickle
 import os
 import argparse
 
+from pathlib import Path
+import sys
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.append(str(BASE_DIR))
+
+
 # Import tigramite PCMCI and independence test
 try:
     from tigramite import data_processing as pp
@@ -23,7 +30,7 @@ except ImportError as e:
 
 # Import the feature extraction function (assumed to be implemented elsewhere)
 try:
-    from high_level_feature_extraction import extract_high_level_features
+    from features.high_level_feature_extraction import extract_high_level_features
 except ImportError as e:
     raise ImportError("Function extract_high_level_features not found. "
                       "Ensure high_level_feature_extraction.py is in the path.") from e
@@ -42,7 +49,9 @@ args = parser.parse_args()
 START_CYCLE = args.start
 END_CYCLE = args.end
 MAX_LAG = args.lag
-PATH_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/data"
+PATH_DIR = BASE_DIR / "data" / "raw"
+OUT_DIR = BASE_DIR / "data" / "causality"
+
 SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01)
 
 # 1. Feature extraction
@@ -79,7 +88,6 @@ p_matrix, val_matrix = results['p_matrix'], results['val_matrix']
 # Note: If multiple lags, p_matrix and val_matrix have shape (N, N, tau_max+1) including lag 0.
 # We consider lags 0, 1..MAX_LAG. We'll create adjacency matrices for each lag.
 # 3. Construct and save adjacency matrix/matrices
-OUT_DIR = "/home/wangyuxiao/project/gilbert_copy/HSTI/pcmci"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 if MAX_LAG == 0:

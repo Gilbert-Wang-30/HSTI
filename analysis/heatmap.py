@@ -27,23 +27,28 @@ def plot_heatmap(matrix, output_path, title):
     plt.close()
 
 if __name__ == "__main__":
+    from pathlib import Path
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+    
     parser = argparse.ArgumentParser(description="Visualize and Save PCMCI Adjacency Matrix Heatmap")
     parser.add_argument("--start", type=int, required=True, help="Start cycle index")
     parser.add_argument("--end", type=int, required=True, help="End cycle index")
     parser.add_argument("--lag", type=int, required=True, help="Lag to visualize (e.g., 0 or 1 or 2...)")
-    parser.add_argument("--dir", type=str, default="pcmci", help="Directory containing PCMCI .pkl files")
-    parser.add_argument("--outdir", type=str, default="heatmaps", help="Directory to save heatmap PNG")
+    parser.add_argument("--dir", type=str, default="data/causality", help="Directory containing PCMCI .pkl files")
+    parser.add_argument("--outdir", type=str, default="data/causality", help="Directory to save heatmap PNG")
 
     args = parser.parse_args()
-    os.makedirs(args.outdir, exist_ok=True)
+    outdir = BASE_DIR / args.outdir
+    outdir.mkdir(parents=True, exist_ok=True)
 
     if args.lag == 0:
         filename = f"pcmci_instant_strength_matrix_cycles_{args.start}_to_{args.end}_lag0.pkl"
     else:
         filename = f"pcmci_strength_matrix_cycles_{args.start}_to_{args.end}_lag{args.lag}.pkl"
 
-    file_path = os.path.join(args.dir, filename)
-    output_img = os.path.join(args.outdir, f"heatmap_cycles_{args.start}_to_{args.end}_lag{args.lag}.png")
+    file_path = BASE_DIR / args.dir / filename
+    output_img = BASE_DIR / args.outdir / f"heatmap_cycles_{args.start}_to_{args.end}_lag{args.lag}.png"
 
     try:
         W = load_matrix(file_path)
