@@ -98,8 +98,11 @@ if __name__ == "__main__":
     val_len = int(total * 0.2)
     test_len = total - train_len - val_len
 
+    # Set fixed seed for reproducibility
+    generator = torch.Generator().manual_seed(42)
+
     # Split dataset
-    train_set, val_set, test_set = random_split(dataset, [train_len, val_len, test_len])
+    train_set, val_set, test_set = random_split(dataset, [train_len, val_len, test_len], generator=generator)
 
     # Save function
     def save_dataset(obj, name):

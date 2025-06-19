@@ -134,9 +134,9 @@ def compute_co_occurrence_matrix():
     print("Co-occurrence matrix (counts of co-clustering in 20 samples):")
     print(co_occ_matrix)
 
-    # Convert to binary matrix with threshold 80% (>=16 out of 20)
-    binary_matrix = (co_occ_matrix >= 16).astype(int)
-    print("\nBinary co-occurrence matrix (1 if co-occurred in >=16 samples, else 0):")
+    # Convert to binary matrix with threshold 80% (>=14 out of 20)
+    binary_matrix = (co_occ_matrix >= 14).astype(int)
+    print("\nBinary co-occurrence matrix (1 if co-occurred in >=14 samples, else 0):")
     print(binary_matrix)
 
     return binary_matrix, co_occ_matrix
