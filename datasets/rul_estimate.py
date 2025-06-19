@@ -1,7 +1,10 @@
 import pandas as pd
 
 # Load profile.txt (assuming space-separated and only first 4 columns are used)
-profile_path = "/home/wangyuxiao/project/gilbert_copy/HSTI/data/profile.txt"
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent
+profile_path = BASE_DIR / "data" / "raw" / "profile.txt"
+output_path = BASE_DIR / "data" / "raw" / "rul_profile.txt"
 df = pd.read_csv(profile_path, delim_whitespace=True, header=None, usecols=[0, 1, 2, 3])
 df.columns = ["cooler", "valve", "pump", "accumulator"]
 
@@ -28,6 +31,7 @@ weight = 0.3 * min_score + 0.7
 rul_score = weight * scores.mean(axis=1) * 100  # In percentage
 # Save to rul_profile.txt
 output_df = pd.DataFrame({"RUL": rul_score.round(2)})
-output_path = "/home/wangyuxiao/project/gilbert_copy/HSTI/data/rul_profile.txt"
 # Save to rul_profile.txt (one score per line, no header or index)
 output_df.to_csv(output_path, index=False, header=False, float_format="%.2f")
+
+print(f"RUL scores saved to {output_path}")

@@ -146,16 +146,27 @@ def compute_co_occurrence_matrix():
 if __name__ == "__main__":
     import os
     import pickle
-    from data_loader import data_loader
+    from pathlib import Path
 
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    data_path = BASE_DIR / "data" / "processed" / "train.pkl"
+    output_dir = BASE_DIR / "data" / "correlation"
+
+    import sys
+
+    # Add project root to sys.path
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    from datasets.data_loader import data_loader
+
+    
     result = compute_co_occurrence_matrix()
     if result is not None:
         binary_matrix, full_matrix = result
 
-    os.makedirs("co-kmean-cluster", exist_ok=True)
-    with open("/home/wangyuxiao/project/gilbert_copy/HSTI/co-kmean-cluster/binary_co_matrix.pkl", "wb") as f:
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_dir / "binary_co_matrix.pkl", "wb") as f:
         pickle.dump(binary_matrix, f)
-    with open("/home/wangyuxiao/project/gilbert_copy/HSTI/co-kmean-cluster/full_co_matrix.pkl", "wb") as f:
+    with open(output_dir / "full_co_matrix.pkl", "wb") as f:
         pickle.dump(full_matrix, f)
 
-    print("[INFO] Saved binary and full co-occurrence matrices to 'co-kmean-cluster/'")
+    print("[INFO] Saved binary and full co-occurrence matrices to 'correlation/'")

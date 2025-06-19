@@ -83,8 +83,9 @@ class data_loader(Dataset):
         return (tensor_100, tensor_10, tensor_1), rul_value
     
 if __name__ == "__main__":
-    data_dir = "/home/wangyuxiao/project/gilbert_copy/HSTI/data/"
-    output_dir = "/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data"
+    from pathlib import Path
+    data_dir = Path(__file__).resolve().parent.parent / "data" / "raw"
+    output_dir = Path(__file__).resolve().parent.parent / "data" / "processed"
     os.makedirs(output_dir, exist_ok=True)
     dataset = data_loader(data_dir)
 
