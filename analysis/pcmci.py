@@ -23,7 +23,7 @@ except ImportError as e:
 
 # Import the feature extraction function (assumed to be implemented elsewhere)
 try:
-    from high_level_feature_extraction import extract_high_level_features
+    from ziyun_copy.HSTI.features.high_level_feature_extraction import extract_high_level_features
 except ImportError as e:
     raise ImportError("Function extract_high_level_features not found. "
                       "Ensure high_level_feature_extraction.py is in the path.") from e
