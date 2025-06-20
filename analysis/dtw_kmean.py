@@ -78,10 +78,10 @@ def dtw_kmeans_cluster(sensor_series, n_clusters=2, max_iter=10):
     return labels, centers, A
 
 
-def compute_co_occurrence_matrix():
+def compute_co_occurrence_matrix(datapath):
     # Load the dataset from the pickle file
     try:
-        with open('/home/wangyuxiao/project/gilbert_copy/HSTI/processed_data/train.pkl', 'rb') as f:
+        with open(datapath, 'rb') as f:
             data = pickle.load(f)
     except Exception as e:
         print(f"Failed to load dataset: {e}")
@@ -94,7 +94,7 @@ def compute_co_occurrence_matrix():
     for i in range(20):
         print(f"[INFO] Processing sample {i}...")
 
-        (x100, x10, x1), label = data[i]  # unpack the sample tuple
+        (x100, x10, x1), features, label = data[i]  # unpack the sample tuple
         try:
             # Flatten each sensor's 6 time windows into one 1D time series
             sensor_series = []
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     from datasets.data_loader import data_loader
 
     
-    result = compute_co_occurrence_matrix()
+    result = compute_co_occurrence_matrix(data_path)
     if result is not None:
         binary_matrix, full_matrix = result
 

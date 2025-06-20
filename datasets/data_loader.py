@@ -3,7 +3,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, random_split
 import pickle
+from pathlib import Path
+import sys
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.append(str(BASE_DIR))
+from features.high_level_feature_extraction import extract_cycle_features
 
 class data_loader(Dataset):
     def __init__(self, data_dir):
@@ -72,15 +77,11 @@ class data_loader(Dataset):
         # print(f"Cycle {idx}: 100Hz shape {tensor_100.shape}, 10Hz shape {tensor_10.shape}, 1Hz shape {tensor_1.shape}")
         
         rul_value  = torch.tensor(self.rul[idx], dtype=torch.float32)  # scalar
-        # print(f"Cycle {idx}: RUL value {rul_value.item()}")
-        
-            # Print the first sample of each tensor for debugging
-        # print(f"Cycle {idx}: ")
-        # print(f"100Hz sample {tensor_100[0, :, :5]}, ")
-        # print(f"10Hz sample {tensor_10[0, :, :5]}, ")
-        # print(f"1Hz sample {tensor_1[0, :, :5]}")
+        # Extract high-level features for this sample
+        features, _ = extract_cycle_features(tensor_100, tensor_10, tensor_1, rul_value)
+
         # Return a tuple of the three tensors and the RUL label
-        return (tensor_100, tensor_10, tensor_1), rul_value
+        return (tensor_100, tensor_10, tensor_1), features, rul_value
     
 if __name__ == "__main__":
     from pathlib import Path
@@ -89,9 +90,16 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     dataset = data_loader(data_dir)
 
-    # Test first 1 samples
-    for i in range(1):
-        x, y = dataset[i]
+# Test first 3 samples
+    for i in (0, 1, 220):
+        (x100, x10, x1), features, rul = dataset[i]
+
+        print(f"\n[Sample {i}]")
+        print(f"  x100 shape    : {x100.shape} (expect (7, 6, 1000))")
+        print(f"  x10  shape    : {x10.shape}  (expect (2, 6, 100))")
+        print(f"  x1   shape    : {x1.shape}   (expect (8, 6, 10))")
+        print(f"  features shape: {features.shape} (expect (170, 6))")
+        print(f"  RUL value     : {rul.item()}")
 
     # Compute split lengths
     total = len(dataset)

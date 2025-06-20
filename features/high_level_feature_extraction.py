@@ -190,7 +190,7 @@ def extract_cycle_features(
 
     # Combine and reshape to (6, 170)
     combined = np.concatenate([feats_100, feats_10, feats_1], axis=0)
-    features_matrix = combined.transpose(1, 0, 2).reshape(6, 170)
+    features_matrix = combined.transpose(1, 0, 2).reshape(6, -1).T  # shape: (170, 6)
 
     return features_matrix, rul_value
 
