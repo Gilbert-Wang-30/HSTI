@@ -1,0 +1,7 @@
+# train.yaml
+batch_size: 16
+learning_rate: 0.001
+epochs: 100
+patience: 10
+checkpoint_dir: checkpoints/
+loss: MSELoss
