@@ -8,7 +8,7 @@ import sys
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR))
-from features.high_level_feature_extraction import extract_cycle_features
+from features.high_level_feature_extraction import extract_cycle_features, extract_high_level_features
 
 class data_loader(Dataset):
     def __init__(self, data_dir):
@@ -44,44 +44,48 @@ class data_loader(Dataset):
         
         # Load RUL labels (assuming a single-column text file)
         rul_path = os.path.join(data_dir, "rul_profile.txt")
-        self.rul = np.loadtxt(rul_path, dtype=np.float32)  # shape (N_cycles,)
+        raw_target = np.loadtxt(rul_path, dtype=np.float32, delimiter=',')
+        rul_array = raw_target[:, 0]  # Extract the first column (RUL values)
+        status_array = raw_target[:, 1:5]  # Extract the status columns (not used here)
+        assert rul_array.ndim == 1, "RUL array should be 1D"
+        assert status_array.ndim == 2 and status_array.shape[1] == 4
         # Ensure RUL is 1D array of length N_cycles.
-        if self.rul.ndim > 1:
-            self.rul = self.rul.squeeze()  # flatten to 1D if needed
+        if rul_array.ndim > 1:
+            rul_array = rul_array.squeeze()  # flatten to 1D if needed
+        self.rul = torch.from_numpy(rul_array)  # Convert to torch tensor (shape: (N_cycles,))
+        self.status = torch.from_numpy(status_array)  # Convert status to tensor (shape: (N_cycles, 4))
+
+        # Pre-compute windowed tensors for each frequency band
+        N = self.data_100.shape[0]  # number of cycles
+        features_matrix, _ = extract_high_level_features(data_dir, start_idx=0, end_idx=N-1)
+        # `features_matrix` shape is (6 * N, 170) because the function stacks 6 windows per cycle vertically.
+        # Reshape it to (N, 6, 170) where each cycle has 6 windows × 170 features:
+        features_matrix = features_matrix.reshape(N, 6, 170)
+        # Transpose to shape (N, 170, 6) so that each cycle's feature matrix matches (170 features × 6 windows):
+        features_matrix = features_matrix.transpose(0, 2, 1)
+        # Convert to torch tensor
+        self.features = torch.from_numpy(features_matrix.astype(np.float32))
+        
+        # Pre-compute windowed tensors for raw sensor data (as before, for completeness)
+        self.tensor_100 = torch.from_numpy(self.data_100.reshape(N, 7, 6, 1000))
+        self.tensor_10  = torch.from_numpy(self.data_10.reshape(N, 2, 6, 100))
+        self.tensor_1   = torch.from_numpy(self.data_1.reshape(N, 8, 6, 10))
+
 
     def __len__(self):
         return len(self.rul)  # number of cycles
     
     def __getitem__(self, idx):
-        # Extract one cycle of data for each frequency band
-        cycle_100 = self.data_100[idx]   # shape (7, 6000)
-        cycle_10  = self.data_10[idx]    # shape (2,  600)
-        cycle_1   = self.data_1[idx]     # shape (8,   60)
-        
-        # Split each into 6 windows of equal length along the time dimension
-        windows_100 = [cycle_100[:, j*1000:(j+1)*1000] for j in range(6)]
-        windows_100 = np.stack(windows_100, axis=1)   # shape (7, 6, 1000)
+        # Simply index into precomputed tensors and features
+        tensor_100 = self.tensor_100[idx]   # shape: (7, 6, 1000)
+        tensor_10  = self.tensor_10[idx]    # shape: (2, 6, 100)
+        tensor_1   = self.tensor_1[idx]     # shape: (8, 6, 10)
+        features   = self.features[idx]     # shape: (feature_dim, 6)
+        rul_value  = self.rul[idx]          # torch scalar (0-dim tensor) for the RUL
+        status_value = self.status[idx]      # shape: (4,) for the status
 
-        windows_10  = [cycle_10[:, j*100:(j+1)*100] for j in range(6)]
-        windows_10  = np.stack(windows_10, axis=1)    # shape (2, 6, 100)
-
-        windows_1   = [cycle_1[:, j*10:(j+1)*10] for j in range(6)]
-        windows_1   = np.stack(windows_1, axis=1)     # shape (8, 6, 10)
-
-            
-        # Convert to torch.FloatTensor
-        tensor_100 = torch.from_numpy(windows_100)  # shape (7, 6, 1000)
-        tensor_10  = torch.from_numpy(windows_10)   # shape (2, 6, 100)
-        tensor_1   = torch.from_numpy(windows_1)    # shape (8, 6, 10)
-        
-        # print(f"Cycle {idx}: 100Hz shape {tensor_100.shape}, 10Hz shape {tensor_10.shape}, 1Hz shape {tensor_1.shape}")
-        
-        rul_value  = torch.tensor(self.rul[idx], dtype=torch.float32)  # scalar
-        # Extract high-level features for this sample
-        features, _ = extract_cycle_features(tensor_100, tensor_10, tensor_1, rul_value)
-
-        # Return a tuple of the three tensors and the RUL label
-        return (tensor_100, tensor_10, tensor_1), features, rul_value
+        # Return the tuple of sensor tensors, the features, and the RUL label
+        return (tensor_100, tensor_10, tensor_1), features, rul_value, status_value
     
 if __name__ == "__main__":
     from pathlib import Path
@@ -92,13 +96,14 @@ if __name__ == "__main__":
 
 # Test first 3 samples
     for i in (0, 1, 220):
-        (x100, x10, x1), features, rul = dataset[i]
+        (x100, x10, x1), features, rul, status = dataset[i]
 
         print(f"\n[Sample {i}]")
         print(f"  x100 shape    : {x100.shape} (expect (7, 6, 1000))")
         print(f"  x10  shape    : {x10.shape}  (expect (2, 6, 100))")
         print(f"  x1   shape    : {x1.shape}   (expect (8, 6, 10))")
         print(f"  features shape: {features.shape} (expect (170, 6))")
+        print(f"  status shape  : {status.shape} (expect (4,))")
         print(f"  RUL value     : {rul.item()}")
 
     # Compute split lengths
