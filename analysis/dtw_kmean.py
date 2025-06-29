@@ -94,7 +94,7 @@ def compute_co_occurrence_matrix(datapath):
     for i in range(20):
         print(f"[INFO] Processing sample {i}...")
 
-        (x100, x10, x1), features, label = data[i]  # unpack the sample tuple
+        (x100, x10, x1), features, label, status = data[i]  # unpack the sample tuple
         try:
             # Flatten each sensor's 6 time windows into one 1D time series
             sensor_series = []

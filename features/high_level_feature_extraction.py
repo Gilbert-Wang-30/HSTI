@@ -45,7 +45,7 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
 
     # Load RUL labels (and profiles if applicable)
     rul_path = os.path.join(data_dir, "rul_profile.txt")
-    rul_array = np.loadtxt(rul_path, dtype=np.float32)  # shape: (N_cycles,)
+    rul_array = np.loadtxt(rul_path, dtype=np.float32, delimiter=',')
     if rul_array.ndim > 1:
         rul_array = rul_array.squeeze()  # ensure 1D array of length N_cycles
 
@@ -55,7 +55,7 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
     n_cycles = end_idx - start_idx + 1
 
     # Check that all selected cycles have the same RUL (and same profile/status if relevant)
-    selected_ruls = rul_array[start_idx:end_idx+1]
+    selected_ruls = rul_array[start_idx:end_idx+1, 0]
     if not np.all(selected_ruls == selected_ruls[0]):
         print("[WARNING] Selected cycles have different RUL values or profiles. Proceeding with first RUL only.")
         # raise ValueError("Selected cycles have different RUL values or system profiles; cannot merge features.")
