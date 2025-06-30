@@ -1,6 +1,6 @@
 # train.yaml
 batch_size: 16
-learning_rate: 0.00001
-epochs: 120
+learning_rate: 0.00008
+epochs: 500
 patience: 10
 checkpoint_dir: checkpoints/

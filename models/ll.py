@@ -8,18 +8,18 @@ class MultiTaskModel(nn.Module):
         super(MultiTaskModel, self).__init__()
         # Shared layers
         self.shared_net = nn.Sequential(
-            nn.Linear(in_features, 50),
+            nn.Linear(in_features, 500),
             nn.ReLU(),
             nn.Dropout(0.2),  # Dropout layer to prevent overfitting
-            nn.Linear(50, 50),
+            nn.Linear(500, 250),
             nn.ReLU()
         )
         # RUL head
-        self.rul_head = nn.Linear(50, 1)
+        self.rul_head = nn.Linear(250, 1)
         # Status classification heads (one linear layer per status)
         self.status_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(in_features, 300),
+                nn.Linear(250, 300),
                 nn.ReLU(),
                 nn.Dropout(0.2),
                 nn.Linear(300, 50),
@@ -36,6 +36,6 @@ class MultiTaskModel(nn.Module):
         features = self.shared_net(x)  # output shape: (batch_size, 50)
         rul_output = self.rul_head(features).squeeze(-1)  # RUL output shape: (batch,)
         # Compute logits for each status head
-        status_logits = [head(x) for head in self.status_heads]  # list of tensors
+        status_logits = [head(features) for head in self.status_heads]  # list of tensors
         status_probs = [F.softmax(logit, dim=1) for logit in status_logits]
         return rul_output, status_logits, status_probs

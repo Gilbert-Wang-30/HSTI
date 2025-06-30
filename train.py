@@ -64,7 +64,7 @@ model.train()  # set model to training mode (optional since new model is train b
 if optim_name.lower() == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 else:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-8)
 
 # Set up loss function
 criterion_rul = nn.MSELoss()
