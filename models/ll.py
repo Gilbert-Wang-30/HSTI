@@ -7,6 +7,7 @@ class LinearLayer(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(in_features, 50),
             nn.ReLU(),
+            nn.Dropout(0.2),  # Dropout layer to prevent overfitting
             nn.Linear(50, 50),
             nn.ReLU(),
             nn.Linear(50, out_features)  # outputs 1 value (e.g. RUL)
