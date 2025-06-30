@@ -7,6 +7,16 @@ from models.ll import LinearLayer  # Assuming this is a simple linear layer mode
 from datasets.data_loader import data_loader
 import pickle
 import os
+from pathlib import Path
+
+from torch.utils.tensorboard import SummaryWriter
+data_dir = Path(__file__).resolve().parent
+
+from datetime import datetime
+run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+writer = SummaryWriter(log_dir=f"{data_dir}/runs/experiment_1/{run_id}")
+print("TensorBoard log path:", writer.log_dir)
+
 
 # 1. Load training configuration from YAML
 with open('config/train.yaml', 'r') as f:
@@ -25,13 +35,20 @@ optim_name = config.get('optimizer', 'AdamW')         # e.g., "Adam" or "SGD"
 loss_name = config.get('loss', 'MSELoss')            # e.g., "MSELoss" or "CrossEntropyLoss"
 
 # 2. Load training data from pickle file
-train_dataset = torch.load('data/processed/train.pkl')  # assumes the dataset was saved via torch.save or pickle
+with open('data/processed/train.pkl', 'rb') as f:
+    train_dataset = pickle.load(f)
+
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+with open('data/processed/val.pkl', 'rb') as f:
+    dev_dataset = pickle.load(f)
+dev_loader = DataLoader(dev_dataset, batch_size=batch_size, shuffle=False)
 
 
 # 2.5 Grabs the adjacency matrix from the dataset if available
 from pathlib import Path
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent
+# print("Looking for file at:", BASE_DIR)
+
 file_path = BASE_DIR / 'data' / 'causality' / 'pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl'
 if not os.path.exists(file_path):
     raise FileNotFoundError(f"No file found at {file_path}")
@@ -41,7 +58,7 @@ adjacency_matrix = torch.tensor(matrix, dtype=torch.float32)  # Convert to tenso
 
 
 # 3. Initialize the model
-model = STGCN(adjacency_matrix=adjacency_matrix)
+model = LinearLayer(1020, 1)  # Example: input features = 1020, output = 1 (RUL value)
 model.train()  # set model to training mode (optional since new model is train by default)
 
 # 4. Set up optimizer
@@ -65,11 +82,17 @@ for epoch in range(epochs):
     total_loss = 0.0
     for batch in train_loader:
         # Assuming each batch is a tuple (inputs, targets)
-        inputs, targets = batch
+        (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
+        inputs = features  # Use features as input to the model
+        inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
+        inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
 
+        targets = rul_value  # Use RUL value as target
         # Forward pass: compute model predictions
         outputs = model(inputs)
 
+        # print("outputs.shape:", outputs.shape)
+        # print("targets.shape:", targets.shape)
         # Compute loss
         loss = criterion(outputs, targets)
 
@@ -82,9 +105,30 @@ for epoch in range(epochs):
     
     # Optionally, print average loss for the epoch for monitoring
     avg_loss = total_loss / len(train_loader)
+    writer.add_scalar('Loss/train', avg_loss, epoch)
     print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
 
+    # Validation step
+    model.eval()  # switch to eval mode for validation
+    val_loss = 0.0
+    with torch.no_grad():
+        for batch in dev_loader:  # loop over validation data
+            (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
+            inputs = features  # Use features as input to the model
+            inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
+            inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
+            targets = rul_value  # Use RUL value as target
+            outputs = model(inputs)
+            val_loss += criterion(outputs, targets).item()
+    val_loss /= len(dev_loader)  # average validation loss
+    writer.add_scalar('Loss/val', val_loss, epoch)
+    model.train()  # switch back to training mode
+
+
 # 6. Save the trained model
-model_save_path = 'models/stgcn_trained.pth'
+model_save_path = 'models/ll_trained.pth'
 torch.save(model.state_dict(), model_save_path)
 print(f"Model saved to {model_save_path}")
+
+writer.flush()
+writer.close()

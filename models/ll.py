@@ -1,13 +1,17 @@
-# simple ll model for testing
 import torch
 import torch.nn as nn
 
 class LinearLayer(nn.Module):
-    def __init__(self, in_features, out_features):
+    def __init__(self, in_features, out_features=1):
         super(LinearLayer, self).__init__()
-        self.linear = nn.Linear(in_features, 50)
-        self.linear_out = nn.Linear(50, out_features)
+        self.net = nn.Sequential(
+            nn.Linear(in_features, 50),
+            nn.ReLU(),
+            nn.Linear(50, 50),
+            nn.ReLU(),
+            nn.Linear(50, out_features)  # outputs 1 value (e.g. RUL)
+        )
 
     def forward(self, x):
-        return self.linear(x)
+        return self.net(x).squeeze(-1)  # output shape: (batch_size,)
     
