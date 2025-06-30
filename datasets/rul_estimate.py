@@ -10,20 +10,31 @@ df = pd.read_csv(profile_path, delim_whitespace=True, header=None, usecols=[0, 1
 df.columns = ["cooler", "valve", "pump", "accumulator"]
 
 
-# Normalize each component
-cooler_score = df["cooler"]
-valve_score = df["valve"]
-pump_score = df["pump"]
-acc_score = df["accumulator"]
+# ─── Define Mapping Dictionaries ───────────────────────────────────────────
+cooler_map = {3: 0, 20: 1, 100: 2}
+valve_map = {100: 0, 90: 1, 80: 2, 73: 3}
+pump_map = {0: 0, 1: 1, 2: 2}
+accumulator_map = {130: 0, 115: 1, 100: 2, 90: 3}
+
+# ─── Apply Mappings ────────────────────────────────────────────────────────
+cooler_class = df["cooler"].map(cooler_map)
+valve_class = df["valve"].map(valve_map)
+pump_class = df["pump"].map(pump_map)
+accumulator_class = df["accumulator"].map(accumulator_map)
 
 # Final RUL score
 rul_score = rul_score = 1.0 - (np.arange(len(df)) / len(df))
 
-# Save to rul_profile.txt
-output_df = pd.DataFrame({"RUL": rul_score.round(4), "cooler_score": cooler_score,
-                          "valve_score": valve_score,
-                          "pump_score": pump_score, "accumulator_score": acc_score})
-# Save to rul_profile.txt (one score per line, no header or index)
+# ─── Save to File ──────────────────────────────────────────────────────────
+output_df = pd.DataFrame({
+    "RUL": rul_score.round(4),
+    "cooler_class": cooler_class,
+    "valve_class": valve_class,
+    "pump_class": pump_class,
+    "accumulator_class": accumulator_class
+})
+
+# Save to file (no header, no index)
 output_df.to_csv(output_path, index=False, header=False, float_format="%.4f")
 
-print(f"RUL scores saved to {output_path}")
+print(f"RUL and class labels saved to {output_path}")

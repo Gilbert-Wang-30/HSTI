@@ -9,7 +9,7 @@ import torch.nn as nn
 from pathlib import Path
 from torch.utils.data import DataLoader
 from models.stgcn import STGCN
-from models.ll import LinearLayer  # Assuming this is a simple linear layer model for testing
+from models.ll import MultiTaskModel  # Assuming this is a simple linear layer model for testing
 from datasets.data_loader import data_loader
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
@@ -28,7 +28,6 @@ hidden_channels = config.get('hidden_channels', 64)
 num_nodes = config.get('num_nodes', 17)
 time_steps = config.get('time_steps', 6)
 optim_name = config.get('optimizer', 'AdamW')         # e.g., "Adam" or "SGD"
-loss_name = config.get('loss', 'MSELoss')            # e.g., "MSELoss" or "CrossEntropyLoss"
 
 
 # ─── TensorBoard Logging Setup ───────────────────────────────────────────
@@ -57,7 +56,8 @@ adjacency_matrix = torch.tensor(matrix, dtype=torch.float32)  # Convert to tenso
 
 
 # ─── Initialize Model ────────────────────────────────────────────────────
-model = LinearLayer(1020, 1)  # Example: input features = 1020, output = 1 (RUL value)
+status_classes = [3, 4, 3, 4]
+model = MultiTaskModel(1020, status_classes)  # Example: input features = 1020, output = 1 (RUL value)
 model.train()  # set model to training mode (optional since new model is train by default)
 
 # ─── Optimizer & Loss ────────────────────────────────────────────────────
@@ -67,18 +67,16 @@ else:
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
 
 # Set up loss function
-if loss_name.lower() == 'crossentropyloss':
-    criterion = nn.CrossEntropyLoss()
-elif loss_name.lower() == 'mseloss':
-    criterion = nn.MSELoss()
-else:
-    # Attempt to get the loss class from torch.nn by name, if a different string is provided
-    criterion_class = getattr(nn, loss_name, None)
-    criterion = criterion_class() if criterion_class else nn.MSELoss()
+criterion_rul = nn.MSELoss()
+criterion_status = nn.CrossEntropyLoss()
 
 # ─── Training Loop ───────────────────────────────────────────────────────
 for epoch in range(epochs):
-    total_loss = 0.0
+    model.train()  # set model to training mode
+    total_rul_loss = 0.0
+    correct_status = [0, 0, 0, 0]
+    total_samples = 0
+
     for batch in train_loader:
         # Assuming each batch is a tuple (inputs, targets)
         (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
@@ -86,45 +84,74 @@ for epoch in range(epochs):
         inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
         inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
 
-        targets = rul_value  # Use RUL value as target
-        # Forward pass: compute model predictions
-        outputs = model(inputs)
+        # Forward pass
+        rul_pred, status_logits, _ = model(inputs)
 
-        # print("outputs.shape:", outputs.shape)
-        # print("targets.shape:", targets.shape)
-        # Compute loss
-        loss = criterion(outputs, targets)
+        # loss computation
+        rul_loss = criterion_rul(rul_pred, rul_value)
+        status_losses = [
+            criterion_status(logits, status_value[:, j].long())
+            for j, logits in enumerate(status_logits)
+        ]
 
-        # Backward pass and optimization step
+
+        total_loss = rul_loss + sum(status_losses)
+
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         optimizer.step()
 
-        total_loss += loss.item()
+        # Backward pass and optimization step
+        
+        total_rul_loss += rul_loss.item()
+        total_samples += rul_value.size(0)
+
+        for j, logits in enumerate(status_logits):
+            preds = logits.argmax(dim=1)
+            correct_status[j] += (preds == status_value[:, j].long()).sum().item()
+
+
     
     # print average loss for the epoch for monitoring
-    avg_loss = total_loss / len(train_loader)
-    writer.add_scalar('Loss/train', avg_loss, epoch)
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+    avg_train_rul_loss = total_rul_loss / len(train_loader)
+    precision_train = [correct / total_samples for correct in correct_status]
+
+    writer.add_scalar('rul_loss/train', avg_train_rul_loss, epoch)
+    for j in range(4):
+        writer.add_scalar(f'status{j}_precision/train', precision_train[j], epoch)
+
 
     # Validation step
-    model.eval()  # switch to eval mode for validation
-    val_loss = 0.0
+    model.eval()
+    val_rul_loss = 0.0
+    correct_status_val = [0, 0, 0, 0]
+    total_val_samples = 0
+
     with torch.no_grad():
-        for batch in dev_loader:  # loop over validation data
+        for batch in dev_loader:
             (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
-            inputs = features  # Use features as input to the model
-            inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
+            inputs = features.flatten(start_dim=1)
             inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
-            targets = rul_value  # Use RUL value as target
-            outputs = model(inputs)
-            val_loss += criterion(outputs, targets).item()
-    val_loss /= len(dev_loader)  # average validation loss
-    writer.add_scalar('Loss/val', val_loss, epoch)
-    model.train()  # switch back to training mode
 
+            rul_pred, status_logits, _ = model(inputs)
+            val_rul_loss += criterion_rul(rul_pred, rul_value).item()
+            total_val_samples += rul_value.size(0)
 
-# 6. Save the trained model
+            for j, logits in enumerate(status_logits):
+                preds = logits.argmax(dim=1)
+                correct_status_val[j] += (preds == status_value[:, j].long()).sum().item()
+
+    avg_val_rul_loss = val_rul_loss / len(dev_loader)
+    precision_val = [correct / total_val_samples for correct in correct_status_val]
+
+    writer.add_scalar('rul_loss/val', avg_val_rul_loss, epoch)
+    for j in range(4):
+        writer.add_scalar(f'status{j}_precision/val', precision_val[j], epoch)
+
+    print(f"Epoch {epoch+1}/{epochs}, RUL Loss: {avg_train_rul_loss:.4f}, " +
+          " ".join([f"S{j}_Prec: {precision_train[j]*100:.1f}%" for j in range(4)]))
+
+# ─── Save Trained Model ───
 model_save_path = 'models/ll_trained.pth'
 torch.save(model.state_dict(), model_save_path)
 print(f"Model saved to {model_save_path}")

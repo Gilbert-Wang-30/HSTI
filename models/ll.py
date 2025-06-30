@@ -1,18 +1,41 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class LinearLayer(nn.Module):
-    def __init__(self, in_features, out_features=1):
-        super(LinearLayer, self).__init__()
-        self.net = nn.Sequential(
+
+class MultiTaskModel(nn.Module):
+    def __init__(self, in_features, status_classes):
+        super(MultiTaskModel, self).__init__()
+        # Shared layers
+        self.shared_net = nn.Sequential(
             nn.Linear(in_features, 50),
             nn.ReLU(),
             nn.Dropout(0.2),  # Dropout layer to prevent overfitting
             nn.Linear(50, 50),
-            nn.ReLU(),
-            nn.Linear(50, out_features)  # outputs 1 value (e.g. RUL)
+            nn.ReLU()
         )
+        # RUL head
+        self.rul_head = nn.Linear(50, 1)
+        # Status classification heads (one linear layer per status)
+        self.status_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_features, 300),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(300, 50),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(50, num_classes)
+            ) for num_classes in status_classes
+        ])
+        # (Each status_head will output logits for that status's classes)
+
+
 
     def forward(self, x):
-        return self.net(x).squeeze(-1)  # output shape: (batch_size,)
-    
+        features = self.shared_net(x)  # output shape: (batch_size, 50)
+        rul_output = self.rul_head(features).squeeze(-1)  # RUL output shape: (batch,)
+        # Compute logits for each status head
+        status_logits = [head(x) for head in self.status_heads]  # list of tensors
+        status_probs = [F.softmax(logit, dim=1) for logit in status_logits]
+        return rul_output, status_logits, status_probs
