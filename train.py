@@ -33,7 +33,10 @@ input_type = config.get('input_type', 'raw_data')  # e.g., "raw_data" or "proces
 
 # ─── TensorBoard Logging Setup ───────────────────────────────────────────
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_dir = BASE_DIR / 'runs' / 'experiment_1' / run_id
+if( input_type == 'raw_data'):
+    log_dir = BASE_DIR / 'runs' / 'raw_data_experiment' / run_id
+else:
+    log_dir = BASE_DIR / 'runs' / 'high_level_data_experiment' / run_id
 writer = SummaryWriter(log_dir=str(log_dir))
 print("TensorBoard log path:", writer.log_dir)
 
@@ -146,7 +149,12 @@ for epoch in range(epochs):
     with torch.no_grad():
         for batch in dev_loader:
             (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
-            inputs = features.flatten(start_dim=1)
+            if input_type == 'raw_data':
+                inputs = torch.cat((tensor_100.flatten(start_dim=1),
+                                tensor_10.flatten(start_dim=1),
+                                tensor_1.flatten(start_dim=1)), dim=1)
+            else:
+                inputs = features.flatten(start_dim=1)
             inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
 
             rul_pred, status_logits, _ = model(inputs)

@@ -10,12 +10,17 @@ import numpy as np  # make sure it's imported
 # Config
 status_classes = [3, 4, 3, 4]
 input_dim = 1020
+raw_input_dim = 43680  # For raw data, if needed
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load model
 model = MultiTaskModel(in_features=input_dim, status_classes=status_classes).to(device)
 model.load_state_dict(torch.load('models/best_ll_model.pth', map_location=device, weights_only=True))
 model.eval()
+
+raw_model = MultiTaskModel(in_features=raw_input_dim, status_classes=status_classes).to(device)
+raw_model.load_state_dict(torch.load('models/best_raw_model.pth', map_location=device, weights_only=True))
+raw_model.eval()
 
 # Evaluate one split
 def evaluate(pkl_path, split_name):
