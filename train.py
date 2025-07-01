@@ -28,6 +28,7 @@ hidden_channels = config.get('hidden_channels', 64)
 num_nodes = config.get('num_nodes', 17)
 time_steps = config.get('time_steps', 6)
 optim_name = config.get('optimizer', 'AdamW')         # e.g., "Adam" or "SGD"
+input_type = config.get('input_type', 'raw_data')  # e.g., "raw_data" or "processed"
 
 
 # ─── TensorBoard Logging Setup ───────────────────────────────────────────
@@ -57,7 +58,10 @@ adjacency_matrix = torch.tensor(matrix, dtype=torch.float32)  # Convert to tenso
 
 # ─── Initialize Model ────────────────────────────────────────────────────
 status_classes = [3, 4, 3, 4]
-model = MultiTaskModel(1020, status_classes)  # Example: input features = 1020, output = 1 (RUL value)
+if( input_type == 'raw_data'):
+    model = MultiTaskModel(43680, status_classes)
+else:
+    model = MultiTaskModel(1020, status_classes)  # Example: input features = 1020, output = 1 (RUL value)
 model.train()  # set model to training mode (optional since new model is train by default)
 
 # ─── Optimizer & Loss ────────────────────────────────────────────────────
@@ -72,7 +76,12 @@ criterion_status = nn.CrossEntropyLoss()
 
 
 best_val_loss = -1  # initialize with a large number
-best_model_path = 'models/best_model.pth'
+if( input_type == 'raw_data'):
+    # For raw data, we assume the model is a simple linear layer model
+    best_model_path = 'models/best_raw_model.pth'
+else:
+    best_model_path = 'models/best_ll_model.pth'
+
 # ─── Training Loop ───────────────────────────────────────────────────────
 for epoch in range(epochs):
     model.train()  # set model to training mode
@@ -83,7 +92,11 @@ for epoch in range(epochs):
     for batch in train_loader:
         # Assuming each batch is a tuple (inputs, targets)
         (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
-        inputs = features  # Use features as input to the model
+        if input_type == 'raw_data':
+            # For raw data, we use the concatenated tensors as input
+            inputs = torch.cat((tensor_100.flatten(start_dim=1), tensor_10.flatten(start_dim=1), tensor_1.flatten(start_dim=1)), dim=1)
+        else:
+            inputs = features  # Use features as input to the model
         inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
         inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
 
@@ -161,9 +174,9 @@ for epoch in range(epochs):
           " ".join([f"S{j}_Prec: {precision_train[j]*100:.1f}%" for j in range(4)]))
 
 # ─── Save Trained Model ───
-# model_save_path = 'models/ll_trained.pth'
-# torch.save(model.state_dict(), model_save_path)
-# print(f"Model saved to {model_save_path}")
+model_save_path = 'models/ll_trained.pth'
+torch.save(model.state_dict(), model_save_path)
+print(f"Model saved to {model_save_path}")
 
 writer.flush()
 writer.close()
