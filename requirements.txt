@@ -1,0 +1,22 @@
+# Python 3.8+ is required to run this project
+# Recommended: use a virtual environment (venv or conda)
+
+# Core ML framework
+torch>=1.10
+
+# Data processing
+numpy>=1.20
+pandas>=1.3
+
+# Visualization (for heatmaps and plots)
+matplotlib>=3.4
+seaborn>=0.11
+
+# Metrics for classification report (acc, prec, recall, f1)
+scikit-learn>=0.24
+
+# YAML config loader
+PyYAML>=5.4
+
+# Causal discovery library (for PCMCI graph)
+tigramite>=5.0
