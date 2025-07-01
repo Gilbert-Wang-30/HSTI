@@ -64,12 +64,15 @@ model.train()  # set model to training mode (optional since new model is train b
 if optim_name.lower() == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 else:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-8)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-9)
 
 # Set up loss function
 criterion_rul = nn.MSELoss()
 criterion_status = nn.CrossEntropyLoss()
 
+
+best_val_loss = -1  # initialize with a large number
+best_model_path = 'models/best_model.pth'
 # ─── Training Loop ───────────────────────────────────────────────────────
 for epoch in range(epochs):
     model.train()  # set model to training mode
@@ -143,6 +146,12 @@ for epoch in range(epochs):
 
     avg_val_rul_loss = val_rul_loss / len(dev_loader)
     precision_val = [correct / total_val_samples for correct in correct_status_val]
+    # Save best model based on validation loss
+    if sum(precision_val) > best_val_loss:
+        best_val_loss = sum(precision_val)
+        torch.save(model.state_dict(), best_model_path)
+        print(f"Best model saved at epoch {epoch+1} with val precision sum: {best_val_loss:.4f}")
+
 
     writer.add_scalar('rul_loss/val', avg_val_rul_loss, epoch)
     for j in range(4):
@@ -152,9 +161,9 @@ for epoch in range(epochs):
           " ".join([f"S{j}_Prec: {precision_train[j]*100:.1f}%" for j in range(4)]))
 
 # ─── Save Trained Model ───
-model_save_path = 'models/ll_trained.pth'
-torch.save(model.state_dict(), model_save_path)
-print(f"Model saved to {model_save_path}")
+# model_save_path = 'models/ll_trained.pth'
+# torch.save(model.state_dict(), model_save_path)
+# print(f"Model saved to {model_save_path}")
 
 writer.flush()
 writer.close()
