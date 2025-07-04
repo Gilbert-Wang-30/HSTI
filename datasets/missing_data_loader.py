@@ -40,17 +40,37 @@ class missing_data_loader(Dataset):
             data_1_list.append(arr)
         self.data_1 = np.stack(data_1_list, axis=1)     # shape: (N_cycles, 8, 60)
         
+        N = self.data_100.shape[0]  # number of cycles
         # **Simulate missing sensor data**: 
         # Extract the last reading of sensor for each cycle as the target, then set it as NaN in the input data.
-        assert sensor_name in self.sensors_1hz, f"{sensor_name} not found in 1Hz sensor list"
-        ts_index = self.sensors_1hz.index(sensor_name)
+        if sensor_name in self.sensors_1hz:
+            freq_group = '1hz'
+            sensor_list = self.sensors_1hz
+            ts_index = sensor_list.index(sensor_name)
+            channel_data = self.data_1
+            reshape_dims = (N, 8, 6, 10)
+        elif sensor_name in self.sensors_10hz:
+            freq_group = '10hz'
+            sensor_list = self.sensors_10hz
+            ts_index = sensor_list.index(sensor_name)
+            channel_data = self.data_10
+            reshape_dims = (N, 2, 6, 100)
+        elif sensor_name in self.sensors_100hz:
+            freq_group = '100hz'
+            sensor_list = self.sensors_100hz
+            ts_index = sensor_list.index(sensor_name)
+            channel_data = self.data_100
+            reshape_dims = (N, 7, 6, 1000)
+        else:
+            raise ValueError(f"Sensor {sensor_name} not found in known groups")
+
         # Copy the last values of sensor (to use as targets) 
-        ts_last_values = self.data_1[:, ts_index, -1].astype(np.float32).copy()  # shape: (N_cycles,)
-        # Set those last readings in the input data to NaN to simulate missing data
-        self.data_1[:, ts_index, -1] = np.nan
+        ts_last_values = channel_data[:, ts_index, -1].astype(np.float32).copy()
+        channel_data[:, ts_index, -1] = np.nan
+
         
         # Reshape each sensor data array into 6 time-window segments (as in original):
-        N = self.data_100.shape[0]  # number of cycles
+
         # 100 Hz sensors: reshape 6000 samples into (6 windows × 1000 samples)
         self.tensor_100 = torch.from_numpy(self.data_100.reshape(N, 7, 6, 1000))
         # 10 Hz sensors: reshape 600 samples into (6 windows × 100 samples)
@@ -94,7 +114,15 @@ if __name__ == "__main__":
         print(f"  x10  shape           : {x10.shape}  (expect (2, 6, 100))")
         print(f"  x1   shape           : {x1.shape}   (expect (8, 6, 10))")
         # Check that the last target sensor reading in input is NaN and the target is the actual value
-        ts_input_last = x1[0, -1, -1].item()  # this is the last sensor value in the input (should be NaN)
+        # Determine the index of the selected sensor within its frequency group
+        if sensor in dataset.sensors_1hz:
+            ts_input_last = x1[dataset.sensors_1hz.index(sensor), -1, -1].item()
+        elif sensor in dataset.sensors_10hz:
+            ts_input_last = x10[dataset.sensors_10hz.index(sensor), -1, -1].item()
+        elif sensor in dataset.sensors_100hz:
+            ts_input_last = x100[dataset.sensors_100hz.index(sensor), -1, -1].item()
+        else:
+            raise ValueError(f"Sensor {sensor} not found in known groups")
         print(f"  Sensor last input value : {ts_input_last} (should be nan)")
         print(f"  Sensor target value     : {ts_val.item()}")  # actual last reading that we aim to predict
 

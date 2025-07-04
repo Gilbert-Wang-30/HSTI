@@ -35,8 +35,25 @@ dev_data = load_dataset(f"data/processed/{SENSOR.lower()}_dev.pkl")
 def collate_ts1(batch):
     X_list, y_list = [], []
     for (x100, x10, x1), ts1_target in batch:
-        sensor_index = {"TS1": 0, "TS2": 1, "TS3": 2, "TS4": 3, "VS1": 4, "SE": 5, "CE": 6, "CP": 7}[SENSOR]
-        full_seq = x1[sensor_index].reshape(-1)  # (60,)
+        sensor_groups = {
+            "100hz": ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"],
+            "10hz": ["FS1", "FS2"],
+            "1hz": ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
+        }
+
+        for freq, sensors in sensor_groups.items():
+            if SENSOR in sensors:
+                sensor_index = sensors.index(SENSOR)
+                if freq == "1hz":
+                    full_seq = x1[sensor_index].reshape(-1)  # (60,)
+                elif freq == "10hz":
+                    full_seq = x10[sensor_index].reshape(-1)  # (600,)
+                elif freq == "100hz":
+                    full_seq = x100[sensor_index].reshape(-1)  # (6000,)
+                break
+        else:
+            raise ValueError(f"Unknown sensor: {SENSOR}")
+
         input_seq = full_seq[:-1].unsqueeze(-1)  # (59, 1) — exclude last
         X_list.append(input_seq)
         y_list.append(ts1_target.unsqueeze(0))  # scalar target
