@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from datasets.missing_data_loader import missing_data_loader
 from models.LSTM import LSTMModel  
 
 # ----------------- Config -----------------
+parser = argparse.ArgumentParser()
+parser.add_argument("--sensor", type=str, default="TS1", help="Sensor to predict (must be 1Hz)")
+args = parser.parse_args()
+SENSOR = args.sensor.upper()
 BATCH_SIZE = 32
 EPOCHS = 150
 LR = 0.001
@@ -23,14 +28,15 @@ def load_dataset(path):
     with open(path, 'rb') as f:
         return pickle.load(f)
 
-train_data = load_dataset("data/processed/ts1_train.pkl")
-dev_data = load_dataset("data/processed/ts1_dev.pkl")
+train_data = load_dataset(f"data/processed/{SENSOR.lower()}_train.pkl")
+dev_data = load_dataset(f"data/processed/{SENSOR.lower()}_dev.pkl")
 
 # ----------------- Collate Function -----------------
 def collate_ts1(batch):
     X_list, y_list = [], []
     for (x100, x10, x1), ts1_target in batch:
-        full_seq = x1[0].reshape(-1)         # (60,) TS1 time series
+        sensor_index = {"TS1": 0, "TS2": 1, "TS3": 2, "TS4": 3, "VS1": 4, "SE": 5, "CE": 6, "CP": 7}[SENSOR]
+        full_seq = x1[sensor_index].reshape(-1)  # (60,)
         input_seq = full_seq[:-1].unsqueeze(-1)  # (59, 1) — exclude last
         X_list.append(input_seq)
         y_list.append(ts1_target.unsqueeze(0))  # scalar target
@@ -46,7 +52,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
 # ----------------- TensorBoard Setup -----------------
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_dir = f"runs/ts1/{run_id}"
+log_dir = f"runs/{SENSOR.lower()}/{run_id}"
 writer = SummaryWriter(log_dir=log_dir)
 print(f"TensorBoard logging to: {log_dir}")
 
@@ -82,8 +88,9 @@ for epoch in range(1, EPOCHS + 1):
 
 # ----------------- Save Model -----------------
 os.makedirs("models", exist_ok=True)
-torch.save(model.state_dict(), f"models/ts1_lstm.pth")
-print("Model saved to models/ts1_lstm.pth")
+model_path = f"models/{SENSOR.lower()}_lstm.pth"
+torch.save(model.state_dict(), model_path)
+print(f"Model saved to {model_path}")
 # ----------------- Close TensorBoard Writer -----------------
 writer.flush()
 writer.close()
