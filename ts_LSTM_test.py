@@ -39,7 +39,7 @@ def extract_temperature_sequences(data_dir):
     labels = np.stack(labels)  # (N/2, 4, 61)
     return inputs, labels
 
-def predict_ts1_autoregressive(model_path, init_seq, device="cpu"):
+def predict_ts_autoregressive(model_path, init_seq, device="cpu"):
     """
     Args:
         model_path (str): path to trained ts1_lstm.pth model
@@ -72,7 +72,7 @@ def predict_ts1_autoregressive(model_path, init_seq, device="cpu"):
 
 
 
-def log_ts1_columnwise_mse_to_tensorboard(y_pred, y_true, run_dir="runs/ts1_long_test"):
+def log_ts_columnwise_mse_to_tensorboard(y_pred, y_true, run_dir="runs/ts1_long_test"):
     """
     Logs column-wise MSE (per timestep) to TensorBoard.
 
@@ -96,26 +96,39 @@ def log_ts1_columnwise_mse_to_tensorboard(y_pred, y_true, run_dir="runs/ts1_long
 # X, Y = extract_temperature_sequences(base_dir)
 # print(X.shape, Y.shape)  # Expect (N/2, 4, 59) and (N/2, 4, 61)
 if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+    from datetime import datetime
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Temperature sensor index (1–4 for TS1–TS4)")
+    args = parser.parse_args()
+    ts_idx = args.ts - 1  # convert to 0-based index
+
+
+    # Prepare paths
+    base_dir = Path(__file__).resolve().parent / "data" / "raw"
+    model_path = Path(f"models/ts{args.ts}_lstm.pth")  # expects model per sensor
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = f"runs/ts{args.ts}_long_test/{run_id}"
+
+
     # Example usage
-    base_dir = "data/raw"  # Adjust to your actual data directory
     X, Y = extract_temperature_sequences(base_dir)
     print("Inputs shape:", X.shape)  # Expect (N/2, 4, 59)
     print("Labels shape:", Y.shape)  # Expect (N/2, 4, 61)
 
-    from pathlib import Path
-    base_dir = Path(__file__).resolve().parent / "data" / "raw"
-    model_path = Path("models/ts1_lstm.pth")
 
     X, Y = extract_temperature_sequences(base_dir)
-    ts1_preds = []
+    preds = []
     for i in range(X.shape[0]):
-        x_ts1 = X[i, 0]  # shape: (59,)
-        pred_seq = predict_ts1_autoregressive(model_path, x_ts1, device="gpu" if torch.cuda.is_available() else "cpu")
-        ts1_preds.append(pred_seq)
+        x_ts = X[i, ts_idx]  # shape: (59,)
+        pred_seq = predict_ts_autoregressive(model_path, x_ts, device="cuda" if torch.cuda.is_available() else "cpu")
+        preds.append(pred_seq)
 
-    ts1_preds = np.stack(ts1_preds)  # shape: (N/2, 61)
-    print("Predicted ~y shape:", ts1_preds.shape)
+    preds = np.stack(preds)  # shape: (N/2, 61)
+    print("Predicted ~y shape:", preds.shape)
 
-    log_ts1_columnwise_mse_to_tensorboard(ts1_preds, Y[:, 0, :], run_dir="runs/ts1_long_test")
+    log_ts_columnwise_mse_to_tensorboard(preds, Y[:, ts_idx, :], run_dir=run_dir)
 
 
