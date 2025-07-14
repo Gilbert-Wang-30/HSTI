@@ -25,7 +25,17 @@ def predict_ts(model_path, init_seq, device="cpu"):
         preds = model(inp)
     return preds.item()
 
-def known_ts_autoregressive(known_seq, ts_idx, device="cpu"):
+
+
+def predict_ts_from_model(model, init_seq, device="cpu"):
+    assert init_seq.shape == (59,)
+    model.eval()
+    inp = torch.tensor(init_seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)
+    with torch.no_grad():
+        preds = model(inp)
+    return preds.item()
+
+def known_ts_autoregressive(known_seq, ts_idx, models, device="cpu"):
     """
     Args:
         known_seq (np.ndarray): array of shape (3, 120) containing values for known sensors,(excepting the one to predict)
@@ -40,19 +50,16 @@ def known_ts_autoregressive(known_seq, ts_idx, device="cpu"):
 
     model_indices = [i for i in range(4) if i != ts_idx]
     for i in range(61):
-        if i % 10 == 0:
-            print(f"    Step {i}/61")
         for model_pos, actual_idx in enumerate(model_indices):
             init_seq = known_seq[model_pos, i:i +59]  # shape: (59,)
-            model_path = f"models/ts{actual_idx + 1}_lstm.pth"
-            preds = predict_ts(model_path, init_seq, device= device)
+            preds = predict_ts_from_model(models[actual_idx], init_seq, device=device)
             target = known_seq[model_pos, i+59]
             delta[model_pos, i] = target - preds  # actual value - predicted value
 
     print("  [known_ts_autoregressive] Delta computation done.")
     return delta
 
-def autoregresive_correlation_fix(base_dir, model_dir, ts_idx, device = "cpu"):
+def autoregresive_correlation_fix(base_dir, model_dir, ts_idx, models, device="cpu"):
     print("[INFO] Extracting temperature sequences...")
     X, Y = extract_temperature_sequences(base_dir)
     print(f"[INFO] Loaded {X.shape[0]} samples")
@@ -72,7 +79,7 @@ def autoregresive_correlation_fix(base_dir, model_dir, ts_idx, device = "cpu"):
 
         # Remove the row for the sensor to predict
         known_seq_trimmed = known_seq[[i for i in range(4) if i != ts_idx]]
-        delta = known_ts_autoregressive(known_seq_trimmed, ts_idx, device)
+        delta = known_ts_autoregressive(known_seq_trimmed, ts_idx, models, device)
         
         current_seq = x_ts[ts_idx]  # shape: (59,) 
         fixed_seq = np.zeros(61)  # shape: (61,)
@@ -102,6 +109,18 @@ if __name__ == "__main__":
     parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Which TS sensor to fix (1–4)")
     args = parser.parse_args()
 
+
+    model_dir = Path(__file__).resolve().parent / "models"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("[MAIN] Preloading models into memory...")
+    models = []
+    for i in range(4):
+        path = model_dir / f"ts{i+1}_lstm.pth"
+        m = LSTMModel(input_size=1, hidden_size=64, num_layers=1)
+        m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+        m.to(device)
+        models.append(m)
+
     ts_idx = args.ts - 1  # convert to 0-based index
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -110,7 +129,7 @@ if __name__ == "__main__":
     model_dir = Path(__file__).resolve().parent / "models"
 
     # Run autoregressive correction
-    fixed_preds = autoregresive_correlation_fix(base_dir, model_dir, ts_idx=ts_idx, device=device)
+    fixed_preds = autoregresive_correlation_fix(base_dir, model_dir, ts_idx=ts_idx, models=models, device=device)
 
     # Get true labels
     _, labels = extract_temperature_sequences(base_dir)
