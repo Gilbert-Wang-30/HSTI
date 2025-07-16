@@ -54,7 +54,7 @@ def collate_ts1(batch):
         else:
             raise ValueError(f"Unknown sensor: {SENSOR}")
 
-        input_seq = full_seq[:-1].unsqueeze(-1)  # (59, 1) — exclude last
+        input_seq = full_seq[:-1].unsqueeze(-1)  # (59, 1) for 1hz — exclude last
         X_list.append(input_seq)
         y_list.append(ts1_target.unsqueeze(0))  # scalar target
     return torch.stack(X_list), torch.stack(y_list)

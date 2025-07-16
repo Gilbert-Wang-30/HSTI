@@ -20,3 +20,5 @@ PyYAML>=5.4
 
 # Causal discovery library (for PCMCI graph)
 tigramite>=5.0
+
+pillow>=8.0

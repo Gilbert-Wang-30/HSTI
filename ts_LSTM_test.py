@@ -101,7 +101,7 @@ if __name__ == "__main__":
     from datetime import datetime
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Temperature sensor index (1–4 for TS1–TS4)")
+    parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Temperature sensor index (1-4 for TS1-TS4)")
     args = parser.parse_args()
     ts_idx = args.ts - 1  # convert to 0-based index
 

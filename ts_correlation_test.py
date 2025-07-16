@@ -106,7 +106,7 @@ if __name__ == "__main__":
     from pathlib import Path
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Which TS sensor to fix (1–4)")
+    parser.add_argument("--ts", type=int, default=1, choices=[1, 2, 3, 4], help="Which TS sensor to fix (1-4)")
     args = parser.parse_args()
 
 
