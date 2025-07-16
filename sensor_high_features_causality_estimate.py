@@ -38,25 +38,41 @@ def main():
     if sensor_lower not in sensor_names_lower:
         raise ValueError(f"Unknown sensor name '{args.sensor}'. Must be one of {sensors}.")
     sensor_index = sensor_names_lower.index(sensor_lower)
-    seg_start = sensor_index * 10
-    seg_end = seg_start + 10  # exclusive
+    seg_start = sensor_index * 7
+    seg_end = seg_start + 7  # exclusive
+    assert seg_end <= 119, f"Segment indices out of bounds: {seg_start}-{seg_end}"
 
     # 1. Extract high-level features for all cycles (as overlapping pairs)
     # (Assuming extract_high_level_features is available in scope or imported from project)
     features_array, _ = extract_high_level_features(f"{data_dir}/raw", start_idx=0, end_idx=2204)
+
+    # Remove unwanted features (var, skew, kurtosis)
+    # Original order per sensor: mean, var, std, skew, kurt, max, min, pulse, peak, amp
+    remove_indices = np.array([1, 3, 4])  # positions of feat_var, feat_skew, feat_kurt
+    keep_indices = np.array([i for i in range(10) if i not in remove_indices])
+
+    # Apply removal for each sensor's 10-feature group across all sensors
+    selected_indices = np.concatenate([keep_indices + 10 * sensor for sensor in range(17)])
+
+    # Filter the features array
+    features_array = features_array[:, selected_indices]
+
+    # Now each cycle has 119 features instead of 170 (17 sensors * 7 features per sensor)
+    assert features_array.shape[1] == 119, f"Feature array should now have shape (N, 119), got {features_array.shape}"
+
     features_array = np.nan_to_num(features_array, nan=0.0, posinf=0.0, neginf=0.0)
     assert features_array.shape[0] % 2 == 0, "Feature count must be even for pairing"
 
     N_pairs = features_array.shape[0] // 2
-    features_array = features_array.reshape(N_pairs, 2, 170)
+    features_array = features_array.reshape(N_pairs, 2, 119)
 
 
-    # Ensure the shape is (N_pairs, 2, 170)
-    assert features_array.shape[1:] == (2, 170), "Feature array should have shape (N, 2, 170)"
+    # Ensure the shape is (N_pairs, 2, 119)
+    assert features_array.shape[1:] == (2, 119), "Feature array should have shape (N, 2, 170)"
     n_pairs = features_array.shape[0]
 
     # 2. Identify observed (non-missing) feature indices
-    all_indices = np.arange(170)
+    all_indices = np.arange(119)
     target_indices = np.arange(seg_start, seg_end)
     observed_idx = np.setdiff1d(all_indices, target_indices)
 
@@ -66,6 +82,11 @@ def main():
         adj_matrix = pickle.load(f)
     adj_matrix = np.array(adj_matrix)  # ensure it's a numpy array for slicing and dot
 
+    # remove the row for the sensor to predict
+    adj_matrix = adj_matrix[selected_indices][:, selected_indices]
+    assert adj_matrix.shape == (119,119), f"Adjacency matrix shape mismatch, got {adj_matrix.shape}"
+    
+    
     # Calculate differences between consecutive cycles
     diffs = features_array[:, 1, :] - features_array[:, 0, :]           # shape (n_pairs, 170)
     diffs_obs = diffs[:, observed_idx]                                  # shape (n_pairs, 160)
@@ -92,7 +113,7 @@ def main():
 
     precision_causal = []
     precision_naive = []
-    for j in range(10):
+    for j in range(7):
         valid = mask[:, j]
         if valid.sum() > 0:
             mape_c = np.abs((reconstructed_t1[valid, j] - actual_t1[valid, j]) / (np.abs(actual_t1[valid, j]) + epsilon)) * 100
@@ -132,8 +153,8 @@ def main():
 
     fig = plt.figure(figsize=(7, 5))
     bar_width = 0.35
-    feature_ids = np.arange(1, 11)
-    # plt.bar(feature_ids - bar_width/2, precision_causal, width=bar_width, color='skyblue', label='Causal')
+    feature_ids = np.arange(1, 8)
+    plt.bar(feature_ids - bar_width/2, precision_causal, width=bar_width, color='skyblue', label='Causal')
     plt.bar(feature_ids + bar_width/2, precision_naive, width=bar_width, color='orange', label='Naive')
     plt.xticks(feature_ids)
     plt.xlabel(f'Feature # (of sensor {sensor_name.upper()})')
