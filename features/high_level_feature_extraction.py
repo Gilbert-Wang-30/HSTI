@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from scipy.stats import skew, kurtosis
 
-def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
+def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int, return_psd0_count=False):
     """
     Load raw sensor data and extract high-level statistical features for cycles in [start_idx, end_idx].
     Returns:
@@ -17,6 +17,8 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
     sensors_100hz = ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"]  # 7 sensors @100Hz
     sensors_10hz = ["FS1", "FS2"]                                       # 2 sensors @10Hz
     sensors_1hz  = ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]  # 8 sensors @1Hz
+
+    psd_zero_counter = 0
 
     # Load all sensor files. Each file has shape (N_cycles, time_length) as per sampling rate.
     data_100_list = []
@@ -75,38 +77,69 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
         return np.stack(windows, axis=1)
 
     # 4. Define a helper to compute statistical features for a given windowed data slice
-    def compute_window_features(window_data):
-        """
-        Compute statistical features for a windowed sensor array.
-        window_data shape: (sensors, 6, window_length)
-        Returns: features array of shape (sensors, 6, 10) where 10 features are computed per window.
-        """
-        # Ensure numpy array
-        data = np.array(window_data, dtype=np.float32)  # shape (C, 6, T_window)
-        C, W, T = data.shape  # sensors, windows, points per window
-        # Reshape to combine sensors and windows for bulk computation: shape (C*W, T)
-        flat = data.reshape(C * W, T)
-        # Compute features across time axis (axis=1 of flat)
-        feat_mean = np.mean(flat, axis=1)
-        feat_var  = np.var(flat, axis=1)
-        feat_std  = np.std(flat, axis=1)
-        feat_skew = skew(flat, axis=1)
-        feat_kurt = kurtosis(flat, axis=1)
-        feat_max  = np.max(flat, axis=1)
-        feat_min  = np.min(flat, axis=1)
-        # Count sign changes or pulses: here defined as number of non-zero differences between consecutive points
-        feat_pulse = np.sum(np.abs(np.diff(flat, axis=1)) > 0, axis=1)
-        feat_peak = np.max(np.abs(flat), axis=1)
-        feat_amp  = feat_max - feat_min
-        # Stack all features for each (sensor,window) pair: shape (C*W, 10)
-        all_features = np.stack([feat_mean, feat_var, feat_std, feat_skew, feat_kurt,
-                                 feat_max, feat_min, feat_pulse, feat_peak, feat_amp], axis=1)
-        # Reshape back to (sensors, windows, 10 features)
-        return all_features.reshape(C, W, -1)
+    def compute_window_features(window_data: np.ndarray, sampling_rate: int) -> np.ndarray:
+        nonlocal psd_zero_counter
+        # Input shape: (sensors, windows, window_length)
+        C, W, T = window_data.shape
+        features = []
+
+        for sensor in range(C):
+            sensor_feats = []
+            for window in range(W):
+                data = window_data[sensor, window, :]
+
+                # Time domain features
+                median = np.median(data)
+                iqr = np.percentile(data, 75) - np.percentile(data, 25)
+                skewness = skew(data)
+                kurt = kurtosis(data)
+                mad = np.median(np.abs(data - median))
+                zero_cross_rate = np.mean(np.diff(np.sign(data - np.mean(data))) != 0)
+                autocorr_1 = np.corrcoef(data[:-1], data[1:])[0, 1] if np.std(data) > 1e-8 else 0.0
+
+
+                # Frequency domain features (FFT-based)
+                fft_vals = np.fft.rfft(data)
+                fft_freq = np.fft.rfftfreq(len(data), d=1./sampling_rate)
+                psd = np.abs(fft_vals) ** 2
+                total_power = np.sum(psd)
+                if total_power < 1e-8:
+                    psd_zero_counter += 1
+                    psd_norm = np.zeros_like(psd)
+                else:
+                    psd_norm = psd / total_power
+
+
+                # Spectral centroid
+                spec_centroid = np.sum(fft_freq * psd_norm)
+                # Spectral bandwidth
+                spec_bandwidth = np.sqrt(np.sum(((fft_freq - spec_centroid)**2) * psd_norm))
+                # Spectral entropy
+                spec_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-12))
+                # Spectral flatness
+                spec_flatness = np.exp(np.mean(np.log(psd + 1e-12))) / (np.mean(psd + 1e-12))
+                # Frequency bands energy ratios (example split: low/mid/high equally divided)
+                bands = np.array_split(psd, 3)
+                band_energy_ratios = [np.sum(band) / (np.sum(psd) + 1e-8) for band in bands]
+
+                # Combine all features into one vector per window
+                window_feats = [
+                    median, iqr, skewness, kurt, mad, zero_cross_rate, autocorr_1,
+                    spec_centroid, spec_bandwidth, spec_entropy,
+                    *band_energy_ratios, spec_flatness
+                ]
+
+                sensor_feats.append(window_feats)
+
+            features.append(sensor_feats)
+
+        return np.array(features)  # shape: (sensors, windows, 14 features)
 
     # 5. Iterate over each selected cycle and compute its feature matrix
     feature_matrices = []  # to collect feature matrices of shape (6, 170) for each cycle
     for idx in range(start_idx, end_idx + 1):
+        if (idx - start_idx) % 100 == 0:
+            print(f"Processed {idx - start_idx} out of {n_cycles} cycles...")
         # Get the raw data for this cycle from each frequency group
         cycle_data_100 = data_100[idx]   # shape (7, 6000) for 100Hz sensors
         cycle_data_10  = data_10[idx]    # shape (2,  600) for 10Hz sensors
@@ -118,9 +151,10 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
         windows_1   = split_into_windows(cycle_data_1,   n_windows=6)  # shape (8, 6, 10)
 
         # Compute statistical features for each group of windows
-        feats_100 = compute_window_features(windows_100)  # shape (7, 6, 10)
-        feats_10  = compute_window_features(windows_10)   # shape (2, 6, 10)
-        feats_1   = compute_window_features(windows_1)    # shape (8, 6, 10)
+        feats_100 = compute_window_features(windows_100, sampling_rate=100)
+        feats_10  = compute_window_features(windows_10, sampling_rate=10)
+        feats_1   = compute_window_features(windows_1, sampling_rate=1)
+
 
         # Combine features from all sensor groups along the sensor axis: shape (17, 6, 10)
         combined_feats = np.concatenate([feats_100, feats_10, feats_1], axis=0)
@@ -128,7 +162,7 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
         # Reshape combined features into a (6, 170) matrix:
         #   - Transpose to shape (6, 17, 10) so that each window (6) is first dimension
         #   - Then flatten the last two dims (17 sensors × 10 features = 170 columns)
-        features_matrix = combined_feats.transpose(1, 0, 2).reshape(6, 170)
+        features_matrix = combined_feats.transpose(1, 0, 2).reshape(6, 238)
         feature_matrices.append(features_matrix)
 
     # 6. Merge all cycles' feature matrices into one (if only one cycle, this is just itself)
@@ -139,6 +173,8 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int):
         merged_matrix = feature_matrices[0]
 
     # 7. Return the feature matrix and the shared RUL value
+    if return_psd0_count:
+        return merged_matrix, shared_rul, psd_zero_counter
     return merged_matrix, shared_rul
 
 
@@ -161,22 +197,56 @@ def extract_cycle_features(
         features_matrix: np.ndarray of shape (6, 170)
         rul_value: same as input
     """
-    def compute_window_features(window_data: np.ndarray) -> np.ndarray:
+    def compute_window_features(window_data: np.ndarray, sampling_rate: int) -> np.ndarray:
+        # Input shape: (sensors, windows, window_length)
         C, W, T = window_data.shape
-        flat = window_data.reshape(C * W, T)
-        feat_mean = np.mean(flat, axis=1)
-        feat_var  = np.var(flat, axis=1)
-        feat_std  = np.std(flat, axis=1)
-        feat_skew = skew(flat, axis=1)
-        feat_kurt = kurtosis(flat, axis=1)
-        feat_max  = np.max(flat, axis=1)
-        feat_min  = np.min(flat, axis=1)
-        feat_pulse = np.sum(np.abs(np.diff(flat, axis=1)) > 0, axis=1)
-        feat_peak  = np.max(np.abs(flat), axis=1)
-        feat_amp   = feat_max - feat_min
-        all_features = np.stack([feat_mean, feat_var, feat_std, feat_skew, feat_kurt,
-                                 feat_max, feat_min, feat_pulse, feat_peak, feat_amp], axis=1)
-        return all_features.reshape(C, W, -1)
+        features = []
+
+        for sensor in range(C):
+            sensor_feats = []
+            for window in range(W):
+                data = window_data[sensor, window, :]
+
+                # Time domain features
+                median = np.median(data)
+                iqr = np.percentile(data, 75) - np.percentile(data, 25)
+                skewness = skew(data)
+                kurt = kurtosis(data)
+                mad = np.median(np.abs(data - median))
+                zero_cross_rate = np.mean(np.diff(np.sign(data - np.mean(data))) != 0)
+                autocorr_1 = np.corrcoef(data[:-1], data[1:])[0, 1] if np.std(data) > 1e-8 else 0.0
+
+
+                # Frequency domain features (FFT-based)
+                fft_vals = np.fft.rfft(data)
+                fft_freq = np.fft.rfftfreq(len(data), d=1./sampling_rate)
+                psd = np.abs(fft_vals) ** 2
+                psd_norm = psd / (np.sum(psd) + 1e-8)
+
+                # Spectral centroid
+                spec_centroid = np.sum(fft_freq * psd_norm)
+                # Spectral bandwidth
+                spec_bandwidth = np.sqrt(np.sum(((fft_freq - spec_centroid)**2) * psd_norm))
+                # Spectral entropy
+                spec_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-12))
+                # Spectral flatness
+                spec_flatness = np.exp(np.mean(np.log(psd + 1e-12))) / (np.mean(psd + 1e-12))
+                # Frequency bands energy ratios (example split: low/mid/high equally divided)
+                bands = np.array_split(psd, 3)
+                band_energy_ratios = [np.sum(band) / (np.sum(psd) + 1e-8) for band in bands]
+
+                # Combine all features into one vector per window
+                window_feats = [
+                    median, iqr, skewness, kurt, mad, zero_cross_rate, autocorr_1,
+                    spec_centroid, spec_bandwidth, spec_entropy,
+                    *band_energy_ratios, spec_flatness
+                ]
+
+                sensor_feats.append(window_feats)
+
+            features.append(sensor_feats)
+
+        return np.array(features)  # shape: (sensors, windows, 14 features)
 
     # Convert torch tensors to numpy arrays
     np_100 = tensor_100.numpy()  # shape (7, 6, 1000)
@@ -184,10 +254,9 @@ def extract_cycle_features(
     np_1   = tensor_1.numpy()    # shape (8, 6, 10)
 
     # Compute features
-    feats_100 = compute_window_features(np_100)  # (7, 6, 10)
-    feats_10  = compute_window_features(np_10)   # (2, 6, 10)
-    feats_1   = compute_window_features(np_1)    # (8, 6, 10)
-
+    feats_100 = compute_window_features(windows_100, sampling_rate=100)
+    feats_10  = compute_window_features(windows_10, sampling_rate=10)
+    feats_1   = compute_window_features(windows_1, sampling_rate=1)
     # Combine and reshape to (6, 170)
     combined = np.concatenate([feats_100, feats_10, feats_1], axis=0)
     features_matrix = combined.transpose(1, 0, 2).reshape(6, -1).T  # shape: (170, 6)
@@ -200,17 +269,25 @@ def extract_cycle_features(
 # print("Feature matrix shape:", X.shape)  # Expect (60, 170) for 10 cycles
 # print("Shared RUL value:", rul_val)
 if __name__ == "__main__":
-    # Example usage
+    import argparse
+    import pickle
+        # Example usage
     from pathlib import Path
     BASE_DIR = Path(__file__).resolve().parent.parent
     data_dir = BASE_DIR / "data" / "raw"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start_idx", type=int, default=0)
+    parser.add_argument("--end_idx", type=int, default=2204)
+    parser.add_argument("--output", type=str, required=True)
+    args = parser.parse_args()
 
-    start_idx = 0
-    end_idx = 209  # Extract features for the first 210 cycles (0-209)
+    features, rul_value, psd_zero_count = extract_high_level_features(
+        data_dir, args.start_idx, args.end_idx, return_psd0_count=True
+    )
+    print("Feature matrix shape:", features.shape)
+    print("Shared RUL value:", rul_value)
+    print(f"Total windows with all-zero PSD: {psd_zero_count}")
 
-    try:
-        features, rul_value = extract_high_level_features(data_dir, start_idx, end_idx)
-        print("Feature matrix shape:", features.shape)  # Should be (60, 170) for 10 cycles
-        print("Shared RUL value:", rul_value)
-    except Exception as e:
-        print("Error:", e)
+    with open(args.output, "wb") as f:
+        pickle.dump({"features": features, "rul": rul_value}, f)
+    print(f"Saved features to: {args.output}")
