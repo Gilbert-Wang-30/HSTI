@@ -54,16 +54,52 @@ OUT_DIR = BASE_DIR / "data" / "causality"
 
 SIGNIFICANCE_LEVEL = 0.001   # Significance level for causal links (default 0.01)
 
-# 1. Feature extraction
-print(f"Extracting high-level features for cycles {START_CYCLE} to {END_CYCLE}...")
-features, extracted_rul = extract_high_level_features(data_dir=PATH_DIR, start_idx=START_CYCLE, end_idx=END_CYCLE)
+# 1. Load feature matrix from pickle
+features_path = BASE_DIR / "features" / "features.pkl"
+assert features_path.exists(), f"Feature file {features_path} not found!"
+with open(features_path, "rb") as f:
+    feat_obj = pickle.load(f)
+features = feat_obj["features"]
+print(f"[LOAD] Loaded feature matrix from {features_path}, shape: {features.shape}")
+# slice features for requested cycles (convert to int, not inclusive)
+features = features[START_CYCLE*6 : (END_CYCLE+1)*6, :]
+print(f"[SLICE] Features selected for cycles {START_CYCLE} to {END_CYCLE}: {features.shape}")
+
 
 # === Clean up feature matrix and track original indices ===
 N_total = features.shape[1]
-valid_mask = (np.std(features, axis=0) > 1e-6) & (~np.isnan(features).any(axis=0))
-kept_indices = np.where(valid_mask)[0].tolist()
-removed_indices = np.where(~valid_mask)[0].tolist()
-features_clean = features[:, kept_indices]
+
+
+
+
+
+
+# -- Improved NaN/Constant Feature Filter --
+orig_features = features.copy()
+num_points, num_features = features.shape
+nan_count = np.isnan(features).sum(axis=0)
+nan_ratio = nan_count / num_points
+
+# (1) Remove columns with >50% NaN
+keep_mask = nan_ratio <= 0.5
+
+# (2) For features with <=50% NaN, fill remaining NaN with 0 (or use np.nanmean(features, axis=0) for mean-impute)
+features[:, keep_mask] = np.where(
+    np.isnan(features[:, keep_mask]),
+    0,  # Or: np.nanmean(features[:, keep_mask], axis=0)
+    features[:, keep_mask]
+)
+
+# (3) Remove columns with zero or near-zero std (after filling NaNs)
+std_mask = np.std(features[:, keep_mask], axis=0) > 1e-6
+
+# Combine masks
+final_mask = np.zeros(num_features, dtype=bool)
+final_mask[keep_mask] = std_mask
+
+kept_indices = np.where(final_mask)[0].tolist()
+removed_indices = np.where(~final_mask)[0].tolist()
+features_clean = features[:, final_mask]
 
 print(f"[Cleanup] Removed {len(removed_indices)} features → {features_clean.shape[1]} remaining.")
 features = features_clean
