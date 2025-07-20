@@ -23,7 +23,7 @@ FEATURE_PATH = BASE_DIR / "features" / "features.pkl"
 CAUSALITY_DIR = BASE_DIR / "data" / "causality"
 ADJ_PATH = CAUSALITY_DIR / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
 STRENGTH_PATH = CAUSALITY_DIR / "pcmci_instant_strength_matrix_cycles_0_to_2204_lag0.pkl"
-COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_coefs_thr_{THRESHOLD:.2f}.pkl"
+COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_r2_thr_{THRESHOLD:.2f}.pkl"
 
 print(f"[LOAD] Loading features from {FEATURE_PATH}")
 with open(FEATURE_PATH, "rb") as f:
@@ -45,11 +45,15 @@ n_samples, n_features = features.shape
 coefs_all = []
 parents_all = []
 
+n_feats_per_sensor = 14  # set as appropriate for your data
+
+
 for j in range(n_features):
-    # Find parent indices (other features) with strong absolute causality to feature j
-    strong_parents = np.where(np.abs(strength[j, :]) >= THRESHOLD)[0]
-    # Exclude self-loop
-    strong_parents = strong_parents[strong_parents != j]
+    # Parent selection: use all parents with nonzero causality (not threshold)
+    strong_parents = np.where(strength[j, :] != 0)[0]
+    # Exclude self and same-sensor features
+    mask = (strong_parents != j) & ((strong_parents // n_feats_per_sensor) != (j // n_feats_per_sensor))
+    strong_parents = strong_parents[mask]
     parents_all.append(strong_parents.tolist())
     if len(strong_parents) == 0:
         coefs_all.append(None)
@@ -61,15 +65,21 @@ for j in range(n_features):
     # Fit OLS linear regression with intercept
     model = LinearRegression(fit_intercept=True)
     model.fit(X, y)
+    r2 = model.score(X, y)
+    if r2 < THRESHOLD:
+        coefs_all.append(None)
+        print(f"Feature {j:3d}: R2={r2:.3f} below threshold {THRESHOLD:.2f} | Not saved")
+        continue
+
     coefs_all.append({
         "coef": model.coef_,
         "intercept": model.intercept_,
         "parents": strong_parents.tolist(),
-        "r2": model.score(X, y),
+        "r2": r2,
         "n_parents": len(strong_parents)
     })
     # Print summary
-    print(f"Feature {j:3d}: n_parents={len(strong_parents):2d}, R2={model.score(X, y):.3f} | parents={strong_parents.tolist()}")
+    print(f"Feature {j:3d}: n_parents={len(strong_parents):2d}, R2={r2:.3f} | parents={strong_parents.tolist()}")
 
 # --- Save regression coefficients ---
 save_obj = {

@@ -249,9 +249,9 @@ def extract_cycle_features(
         return np.array(features)  # shape: (sensors, windows, 14 features)
 
     # Convert torch tensors to numpy arrays
-    np_100 = tensor_100.numpy()  # shape (7, 6, 1000)
-    np_10  = tensor_10.numpy()   # shape (2, 6, 100)
-    np_1   = tensor_1.numpy()    # shape (8, 6, 10)
+    windows_100 = tensor_100.numpy()  # shape (7, 6, 1000)
+    windows_10  = tensor_10.numpy()   # shape (2, 6, 100)
+    windows_1   = tensor_1.numpy()    # shape (8, 6, 10)
 
     # Compute features
     feats_100 = compute_window_features(windows_100, sampling_rate=100)
