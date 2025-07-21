@@ -17,7 +17,12 @@ feature_dir = Path(__file__).resolve().parent.parent / "features"
 features_pkl = feature_dir / "features.pkl"
 
 # 1. Load all models
-model_files = sorted(feature_dir.glob("linear_regression_r2_thr_*.pkl"))
+# model_files = sorted(feature_dir.glob("linear_regression_r2_thr_*.pkl"))
+# model_files = sorted(feature_dir.glob("linear_regression_coefs_thr_*.pkl"))
+# model_files = sorted(feature_dir.glob("linear_regression_coefs_r2_thr_*.pkl"))
+model_files = sorted(feature_dir.glob("linear_regression*.pkl"))
+
+
 model_names = [f.stem for f in model_files]
 
 # 2. Load feature matrix
@@ -82,13 +87,25 @@ for model_path, model_name in zip(model_files, model_names):
     print(f"[{model_name}] Per-feature MAPE: {np.round(feature_mae[:10], 4)} ... mean: {mean_mae:.4f}")
 
 print("\n=== Summary Table: ===")
-print(f"{'Model':30s} | {'Mean MAPE (all features)':>25}")
+print(f"{'Model':50s} | {'Mean MAPE (all features)':>25}  | {'Valid Features':>15}")
 print("-"*60)
 for res in results_per_model:
     model = res["model"]
     valid_mae = [m for m in res["mae_per_feature"] if m != -1 and not np.isnan(m)]
     mean_mae = np.mean(valid_mae) if valid_mae else float('nan')
-    print(f"{model:30s} | {mean_mae:25.5f}")
+    n_valid_features = np.sum(~np.isnan(res["mae_per_feature"]) & (res["mae_per_feature"] != -1))
+    print(f"{model:50s} | {mean_mae:25.5f}  | {n_valid_features:15d}")
+
+
+print(f"{'Model':50s} | {'Median MAPE (all features)':>25}")
+print("-"*60)
+for res in results_per_model:
+    model = res["model"]
+    valid_mae = [m for m in res["mae_per_feature"] if m != -1 and not np.isnan(m)]
+    median_mae = np.median(valid_mae) if valid_mae else float('nan')
+    n_valid_features = np.sum(~np.isnan(res["mae_per_feature"]) & (res["mae_per_feature"] != -1))
+    print(f"{model:50s} | {median_mae:25.5f}  | {n_valid_features:15d}")
+
 
 
 # Optionally, show for each feature across models

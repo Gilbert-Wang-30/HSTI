@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression
 
 # --- Parse only threshold argument ---
 parser = argparse.ArgumentParser()
-parser.add_argument('--threshold', type=float, default=0.8, help='Causality strength threshold (default 0.8)')
+parser.add_argument('--threshold', type=float, default=0.60, help='Causality strength threshold')
 args = parser.parse_args()
 THRESHOLD = args.threshold
 
@@ -23,7 +23,7 @@ FEATURE_PATH = BASE_DIR / "features" / "features.pkl"
 CAUSALITY_DIR = BASE_DIR / "data" / "causality"
 ADJ_PATH = CAUSALITY_DIR / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
 STRENGTH_PATH = CAUSALITY_DIR / "pcmci_instant_strength_matrix_cycles_0_to_2204_lag0.pkl"
-COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_r2_thr_{THRESHOLD:.2f}.pkl"
+COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_coefs_r2_thr_{THRESHOLD:.2f}.pkl"
 
 print(f"[LOAD] Loading features from {FEATURE_PATH}")
 with open(FEATURE_PATH, "rb") as f:
@@ -50,7 +50,7 @@ n_feats_per_sensor = 14  # set as appropriate for your data
 
 for j in range(n_features):
     # Parent selection: use all parents with nonzero causality (not threshold)
-    strong_parents = np.where(strength[j, :] != 0)[0]
+    strong_parents = np.where(np.abs(strength[j, :]) >= 0.001)[0]
     # Exclude self and same-sensor features
     mask = (strong_parents != j) & ((strong_parents // n_feats_per_sensor) != (j // n_feats_per_sensor))
     strong_parents = strong_parents[mask]
