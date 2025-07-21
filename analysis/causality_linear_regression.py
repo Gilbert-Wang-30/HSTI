@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression
 
 # --- Parse only threshold argument ---
 parser = argparse.ArgumentParser()
-parser.add_argument('--threshold', type=float, default=0.60, help='Causality strength threshold')
+parser.add_argument('--threshold', type=float, default=0.50, help='Causality strength threshold')
 args = parser.parse_args()
 THRESHOLD = args.threshold
 

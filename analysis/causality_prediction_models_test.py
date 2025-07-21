@@ -20,7 +20,7 @@ features_pkl = feature_dir / "features.pkl"
 # model_files = sorted(feature_dir.glob("linear_regression_r2_thr_*.pkl"))
 # model_files = sorted(feature_dir.glob("linear_regression_coefs_thr_*.pkl"))
 # model_files = sorted(feature_dir.glob("linear_regression_coefs_r2_thr_*.pkl"))
-model_files = sorted(feature_dir.glob("linear_regression*.pkl"))
+model_files = sorted(feature_dir.glob("linear_regression_coefs_r2*.pkl"))
 
 
 model_names = [f.stem for f in model_files]
