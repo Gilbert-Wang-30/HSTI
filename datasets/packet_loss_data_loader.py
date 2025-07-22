@@ -125,29 +125,41 @@ if __name__ == "__main__":
     BASE_DIR = Path(__file__).resolve().parent.parent
     raw_data_dir = BASE_DIR / "data" / "raw"
     features_path = BASE_DIR / "features" / "features.pkl"
-
+    output_dir = BASE_DIR / "data" / "processed"
+    os.makedirs(output_dir, exist_ok=True)
     dataset = SensorWindowDataset(raw_data_dir, features_path=features_path)
 
-    idx = 100  # try an arbitrary sample
-    for missing_sensor_idx in [0, 7, 13, 16]:
-        input_dict, target_dict = dataset[idx, missing_sensor_idx]
-        print(f"\nSample idx={idx}, missing_sensor={dataset.all_sensors[missing_sensor_idx]}")
-        print(f"  Missing sensor ID: {input_dict['missing_sensor_id']}")
-        print(f"  features_past shape: {input_dict['features_past'].shape}")
-        print(f"  features_present_excl_missing shape: {input_dict['features_present_excl_missing'].shape}")
-        print(f"  raw_past 100Hz shape: {input_dict['raw_past']['data_100'].shape}")
-        print(f"  raw_present_excl_missing 1Hz shape: {input_dict['raw_present_excl_missing']['data_1'].shape}")
-        print(f"  target features (missing): {target_dict['features_present_missing'].shape}")
-        print(f"  target raw (missing): {target_dict['raw_present_missing'].shape}")
+    freq_groups = {
+        "100hz": list(range(0, 7)),
+        "10hz":  list(range(7, 9)),
+        "1hz":   list(range(9, 17)),
+    }
 
+    def save_pkl(lst, name):
+        with open(output_dir / f"{name}.pkl", "wb") as f:
+            pickle.dump(lst, f)
 
-    for ms_idx in [0, 7, 13, 16]:
-        input_dict, target_dict = dataset[(idx, ms_idx)]
-        print(f"\n[{dataset.all_sensors[ms_idx]}] Is missing sensor's raw data all NaN?")
-        if ms_idx < 7:
-            print(np.isnan(input_dict['raw_present_excl_missing']['data_100'][ms_idx, :]).all())
-        elif ms_idx < 9:
-            print(np.isnan(input_dict['raw_present_excl_missing']['data_10'][ms_idx-7, :]).all())
-        else:
-            print(np.isnan(input_dict['raw_present_excl_missing']['data_1'][ms_idx-9, :]).all())
+    for group, sensor_idxs in freq_groups.items():
+        all_samples = []
+        for sensor_idx in sensor_idxs:
+            for idx in range(1, len(dataset)):
+                inp, tgt = dataset[idx, sensor_idx]
+                all_samples.append((inp, tgt))
+        # Shuffle after concatenation
+        np.random.seed(42)
+        np.random.shuffle(all_samples)
+        n_total = len(all_samples)
+        n_train = int(n_total * 0.8)
+        n_val = int(n_total * 0.1)
+        n_test = n_total - n_train - n_val
+        train_set = all_samples[:n_train]
+        val_set = all_samples[n_train:n_train+n_val]
+        test_set = all_samples[n_train+n_val:]
 
+        save_pkl(train_set, f"train_{group}")
+        save_pkl(val_set, f"val_{group}")
+        save_pkl(test_set, f"test_{group}")
+
+        print(f"[{group}] Total: {n_total} | Train: {len(train_set)} | Val: {len(val_set)} | Test: {len(test_set)}")
+
+    print("All splits saved.")
