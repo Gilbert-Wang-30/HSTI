@@ -14,8 +14,11 @@ from sklearn.linear_model import LinearRegression
 # --- Parse only threshold argument ---
 parser = argparse.ArgumentParser()
 parser.add_argument('--threshold', type=float, default=0.50, help='Causality strength threshold')
+parser.add_argument('--mape', type=float, default=0.02 , help='Median MAPE threshold for model inclusion')
 args = parser.parse_args()
 THRESHOLD = args.threshold
+MAPE_THRESHOLD = args.mape
+
 
 # --- Configure project paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,7 +26,7 @@ FEATURE_PATH = BASE_DIR / "features" / "features.pkl"
 CAUSALITY_DIR = BASE_DIR / "data" / "causality"
 ADJ_PATH = CAUSALITY_DIR / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
 STRENGTH_PATH = CAUSALITY_DIR / "pcmci_instant_strength_matrix_cycles_0_to_2204_lag0.pkl"
-COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_coefs_r2_thr_{THRESHOLD:.2f}.pkl"
+COEF_OUTPUT = BASE_DIR / "features" / f"linear_regression_r2_{THRESHOLD:.2f}_mape_{MAPE_THRESHOLD:.2f}.pkl"
 
 print(f"[LOAD] Loading features from {FEATURE_PATH}")
 with open(FEATURE_PATH, "rb") as f:
@@ -66,9 +69,20 @@ for j in range(n_features):
     model = LinearRegression(fit_intercept=True)
     model.fit(X, y)
     r2 = model.score(X, y)
-    if r2 < THRESHOLD:
+
+    # Compute Mean Absolute Percentage Error (MAPE)
+    y_pred = model.predict(X)
+    denom = np.abs(y) + 1e-8
+    mask = denom > 1e-2  # filter out very small denominators (avoid % error explosion)
+    if np.any(mask):
+        mape = np.mean(np.abs(y_pred[mask] - y[mask]) / denom[mask])
+    else:
+        mape = np.nan
+
+
+    if r2 < THRESHOLD or (not np.isnan(mape) and mape > MAPE_THRESHOLD):  # (use MAPE_THRESHOLD var for MAPE)
         coefs_all.append(None)
-        print(f"Feature {j:3d}: R2={r2:.3f} below threshold {THRESHOLD:.2f} | Not saved")
+        print(f"Feature {j:3d}: R2={r2:.3f} or MAPE={mape:.3f} not met | Skipped")
         continue
 
     coefs_all.append({
@@ -76,10 +90,10 @@ for j in range(n_features):
         "intercept": model.intercept_,
         "parents": strong_parents.tolist(),
         "r2": r2,
+        "mape": mape,
         "n_parents": len(strong_parents)
     })
-    # Print summary
-    print(f"Feature {j:3d}: n_parents={len(strong_parents):2d}, R2={r2:.3f} | parents={strong_parents.tolist()}")
+    print(f"Feature {j:3d}: n_parents={len(strong_parents):2d}, R2={r2:.3f}, MAPE={mape:.3f} | parents={strong_parents.tolist()}")
 
 # --- Save regression coefficients ---
 save_obj = {

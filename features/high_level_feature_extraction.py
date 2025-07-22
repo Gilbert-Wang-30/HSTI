@@ -259,7 +259,12 @@ def extract_cycle_features(
     feats_1   = compute_window_features(windows_1, sampling_rate=1)
     # Combine and reshape to (6, 170)
     combined = np.concatenate([feats_100, feats_10, feats_1], axis=0)
-    features_matrix = combined.transpose(1, 0, 2).reshape(6, -1).T  # shape: (170, 6)
+    if combined.shape[1] == 1:
+        # Only one window, so just flatten it
+        features_matrix = combined[:, 0, :].reshape(-1, 1)
+    else:
+        features_matrix = combined.transpose(1, 0, 2).reshape(6, -1).T
+
 
     return features_matrix, rul_value
 

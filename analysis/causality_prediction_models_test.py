@@ -7,7 +7,7 @@ from sklearn.metrics import mean_absolute_error
 
 def mape_abs(y_true, y_pred):
     # Avoid divide by zero by masking zeros
-    mask = np.abs(y_true) != 0
+    mask = np.abs(y_true) > 1e-2
     if not np.any(mask):
         return np.nan
     return np.mean(np.abs(np.abs(y_true[mask]) - np.abs(y_pred[mask])) / np.abs(y_true[mask]))
@@ -20,7 +20,7 @@ features_pkl = feature_dir / "features.pkl"
 # model_files = sorted(feature_dir.glob("linear_regression_r2_thr_*.pkl"))
 # model_files = sorted(feature_dir.glob("linear_regression_coefs_thr_*.pkl"))
 # model_files = sorted(feature_dir.glob("linear_regression_coefs_r2_thr_*.pkl"))
-model_files = sorted(feature_dir.glob("linear_regression_coefs_r2*.pkl"))
+model_files = sorted(feature_dir.glob("linear_regression_r2_0.50_mape*.pkl"))
 
 
 model_names = [f.stem for f in model_files]
