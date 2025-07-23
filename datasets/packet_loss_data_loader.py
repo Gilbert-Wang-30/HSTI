@@ -56,7 +56,7 @@ class SensorWindowDataset(Dataset):
         missing_sensor_idx: which sensor (0-16) is 'missing'
         """
 
-            # Accept tuple for (idx, missing_sensor_idx)
+        # Accept tuple for (idx, missing_sensor_idx)
         if isinstance(idx, tuple) and len(idx) == 2:
             idx, missing_sensor_idx = idx
         else:
