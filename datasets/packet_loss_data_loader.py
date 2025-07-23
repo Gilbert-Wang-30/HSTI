@@ -46,6 +46,80 @@ class SensorWindowDataset(Dataset):
         assert self.data_100.shape[0] == self.data_10.shape[0] == self.data_1.shape[0] == self.features.shape[0]
         self.n_windows = self.features.shape[0]
 
+
+        # ---- PRECOMPUTE LR-PREDICTED FEATURES FOR ALL SENSORS, ALL WINDOWS ----
+        LR_MODEL_PATH = Path(raw_data_dir).parent.parent / "features" / "linear_regression_r2_0.50_mape_0.20.pkl"
+        with open(LR_MODEL_PATH, "rb") as f:
+            lr_model = pickle.load(f)
+        coefs_all = lr_model["coefs_all"]
+        parents_all = lr_model["parents_all"]
+
+        n_windows = self.features.shape[0]
+        n_sensors = self.n_sensors  # 17
+        n_feats = 14
+
+        self.lr_pred_features = np.full((n_windows, n_sensors, n_feats), np.nan, dtype=np.float32)
+        num_pred = 0
+        total = 0
+
+        print("[LR PRECOMPUTE] Predicting high-level features for all sensors, all windows...")
+        for idx in range(n_windows):
+
+            present = self.features[idx].flatten()  # shape (238,)
+            for sensor_id in range(n_sensors):
+                for feat in range(n_feats):
+                    j = sensor_id * n_feats + feat
+                    coefs = coefs_all[j]
+                    if coefs is None:
+                        continue
+                    parents = coefs["parents"]
+                    pred = np.dot(present[parents], coefs["coef"]) + coefs["intercept"]
+                    self.lr_pred_features[idx, sensor_id, feat] = pred
+                    
+                    if not np.isnan(pred):
+                        num_pred += 1
+                    total += 1
+        print(f"[LR PRECOMPUTE] Done. {num_pred}/{total} features predicted (the rest are NaN).")
+        
+        #  ---verify error of feature predictions---
+        
+        print("\n[LR PREDICTION MSE STATISTICS]")
+
+        # Compute MSE for every (sensor, feature) across all windows
+        mse_all = []
+        for sensor_idx, sensor in enumerate(self.all_sensors):
+            mse_sensor = []
+            print(f"Sensor {sensor:>5s} | ", end="")
+            for feat_idx in range(14):
+                # Extract predictions and ground truth for this feature across all windows
+                pred = self.lr_pred_features[:, sensor_idx, feat_idx]
+                gt   = self.features[:, sensor_idx, feat_idx]
+                # Only consider non-NaN pairs
+                mask = ~np.isnan(pred) & ~np.isnan(gt)
+                if mask.sum() == 0:
+                    mse = np.nan
+                else:
+                    mse = np.mean((pred[mask] - gt[mask]) ** 2)
+                mse_sensor.append(mse)
+                print(f"F{feat_idx}: {mse:.5f}", end=" | ")
+            mse_all.extend([m for m in mse_sensor if not np.isnan(m)])
+            print()
+            # Optionally, print best/worst
+            valid_idx = [i for i, m in enumerate(mse_sensor) if not np.isnan(m)]
+            if valid_idx:
+                best = min(valid_idx, key=lambda i: mse_sensor[i])
+                worst = max(valid_idx, key=lambda i: mse_sensor[i])
+                print(f"  [Best: F{best}={mse_sensor[best]:.5f}] [Worst: F{worst}={mse_sensor[worst]:.5f}]")
+
+        print("\n[SUMMARY MSE STATISTICS]")
+        mse_all = np.array(mse_all)
+        print(f"  Mean  MSE over all sensors/features:  {np.nanmean(mse_all):.6f}")
+        print(f"  Median MSE over all sensors/features: {np.nanmedian(mse_all):.6f}")
+        print(f"  #Features with MSE < 1.0: {np.sum(mse_all < 1.0)} / {mse_all.size}")
+        print(f"  #Features with MSE > 10.0: {np.sum(mse_all > 10.0)} / {mse_all.size}")
+
+
+
     def __len__(self):
         # Number of possible (prev, curr) pairs, minus 1 at the end
         return self.n_windows - 1
