@@ -7,6 +7,10 @@ from pathlib import Path
 
 class SensorWindowDataset(Dataset):
     def __init__(self, raw_data_dir, features_path=None):
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[INFO] Using device: {self.device}")
+
         self.sensors_100hz = ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"]
         self.sensors_10hz = ["FS1", "FS2"]
         self.sensors_1hz  = ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
@@ -47,6 +51,15 @@ class SensorWindowDataset(Dataset):
         self.n_windows = self.features.shape[0]
 
 
+        MAX_WINDOWS = 24
+        self.data_100 = self.data_100[:MAX_WINDOWS]
+        self.data_10 = self.data_10[:MAX_WINDOWS]
+        self.data_1 = self.data_1[:MAX_WINDOWS]
+        self.features = self.features[:MAX_WINDOWS]
+        self.n_windows = self.features.shape[0]
+
+
+
         # ---- PRECOMPUTE LR-PREDICTED FEATURES FOR ALL SENSORS, ALL WINDOWS ----
         LR_MODEL_PATH = Path(raw_data_dir).parent.parent / "features" / "linear_regression_r2_0.50_mape_0.20.pkl"
         with open(LR_MODEL_PATH, "rb") as f:
@@ -81,42 +94,127 @@ class SensorWindowDataset(Dataset):
                     total += 1
         print(f"[LR PRECOMPUTE] Done. {num_pred}/{total} features predicted (the rest are NaN).")
         
-        #  ---verify error of feature predictions---
-        
-        print("\n[LR PREDICTION MSE STATISTICS]")
+        # --------- predict raw data for missing sensors ---------
+        import sys
+        sys.path.append(str(Path(__file__).resolve().parent.parent))  # Add parent directory to path
+        from models.LSTM import LSTMModel
+        from ts_LSTM_test import predict_sensor_autoregressive
 
-        # Compute MSE for every (sensor, feature) across all windows
-        mse_all = []
+        def get_sensor_window_params(sensor_name):
+            SENSOR_GROUPS = {
+                "100hz": ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"],
+                "10hz": ["FS1", "FS2"],
+                "1hz": ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
+            }
+            for freq, sensors in SENSOR_GROUPS.items():
+                if sensor_name in sensors:
+                    if freq == "100hz":
+                        return 999, 1000
+                    elif freq == "10hz":
+                        return 99, 100
+                    else:
+                        return 9, 10
+            raise ValueError(f"Unknown sensor: {sensor_name}")
+
+        # LSTM predictions for each sensor
+        self.lstm_pred_raw = [None] * self.n_sensors  # list of (n_windows, window_len)
+
         for sensor_idx, sensor in enumerate(self.all_sensors):
-            mse_sensor = []
-            print(f"Sensor {sensor:>5s} | ", end="")
-            for feat_idx in range(14):
-                # Extract predictions and ground truth for this feature across all windows
-                pred = self.lr_pred_features[:, sensor_idx, feat_idx]
-                gt   = self.features[:, sensor_idx, feat_idx]
-                # Only consider non-NaN pairs
-                mask = ~np.isnan(pred) & ~np.isnan(gt)
-                if mask.sum() == 0:
-                    mse = np.nan
-                else:
-                    mse = np.mean((pred[mask] - gt[mask]) ** 2)
-                mse_sensor.append(mse)
-                print(f"F{feat_idx}: {mse:.5f}", end=" | ")
-            mse_all.extend([m for m in mse_sensor if not np.isnan(m)])
-            print()
-            # Optionally, print best/worst
-            valid_idx = [i for i, m in enumerate(mse_sensor) if not np.isnan(m)]
-            if valid_idx:
-                best = min(valid_idx, key=lambda i: mse_sensor[i])
-                worst = max(valid_idx, key=lambda i: mse_sensor[i])
-                print(f"  [Best: F{best}={mse_sensor[best]:.5f}] [Worst: F{worst}={mse_sensor[worst]:.5f}]")
 
-        print("\n[SUMMARY MSE STATISTICS]")
-        mse_all = np.array(mse_all)
-        print(f"  Mean  MSE over all sensors/features:  {np.nanmean(mse_all):.6f}")
-        print(f"  Median MSE over all sensors/features: {np.nanmedian(mse_all):.6f}")
-        print(f"  #Features with MSE < 1.0: {np.sum(mse_all < 1.0)} / {mse_all.size}")
-        print(f"  #Features with MSE > 10.0: {np.sum(mse_all > 10.0)} / {mse_all.size}")
+            print(f"[LSTM] Predicting for sensor {sensor} ({sensor_idx+1}/{self.n_sensors}) ...")
+
+            # get window params
+            win_in, win_out = get_sensor_window_params(sensor)
+            model_path = Path("models") / f"{sensor.lower()}_lstm.pth"
+            norm_path = Path("models") / f"{sensor.lower()}_lstm_norm_stats.npz"
+
+            # Load model and stats as in your test file
+            lstm = LSTMModel(input_size=1, hidden_size=64, num_layers=1)
+            lstm.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+            lstm.to(self.device)
+            lstm.eval()
+            norm_stats = np.load(norm_path)
+            norm_mean, norm_std = float(norm_stats["mean"]), float(norm_stats["std"])
+
+            # select raw data
+            if sensor in self.sensors_100hz:
+                data = self.data_100[:, sensor_idx, :]
+            elif sensor in self.sensors_10hz:
+                data = self.data_10[:, sensor_idx - 7, :]
+            else:
+                data = self.data_1[:, sensor_idx - 9, :]
+
+            preds = np.full((self.n_windows, win_out), np.nan, dtype=np.float32)
+            for idx in range(1, self.n_windows):
+                if idx % 500 == 0:
+                    print(f"    [LSTM] Sensor {sensor} at window {idx}/{self.n_windows}")
+
+                # get last window's data as init_seq
+                prev_win = data[idx-1]
+                pred = predict_sensor_autoregressive(
+                    lstm, norm_mean, norm_std, prev_win[-win_in:], window_out=win_out, device=self.device
+                )
+
+                preds[idx] = pred
+            self.lstm_pred_raw[sensor_idx] = preds
+            print(f"Sensor {sensor}: LSTM prediction complete, shape={preds.shape}")
+        for i, sensor in enumerate(self.all_sensors):
+            preds = self.lstm_pred_raw[i]
+            print(f"Sensor {sensor}: preds shape = {preds.shape}, window example = {preds[1][:5]}")
+
+
+
+        # ---- PRECOMPUTE HIGH-LEVEL FEATURES FOR LSTM-PREDICTED RAW PRESENT ----
+        from features.high_level_feature_extraction import extract_cycle_features
+
+        def safe_slice(arr, start, end, length=14):
+            sliced = arr[start:end]
+            # Pad or trim to exactly 14
+            if sliced.shape[0] < length:
+                out = np.full((length,), np.nan, dtype=np.float32)
+                out[:sliced.shape[0]] = sliced
+                return out
+            return sliced[:length]
+
+
+
+        self.lstm_pred_highlevel_features = [None] * self.n_sensors  # list of (n_windows, 14)
+
+        for sensor_idx, sensor in enumerate(self.all_sensors):
+            print(f"[LSTM-HL] Extracting high-level features for {sensor} ({sensor_idx+1}/{self.n_sensors})")
+            preds = self.lstm_pred_raw[sensor_idx]  # shape (n_windows, win_out)
+            hl_feats = np.full((self.n_windows, 14), np.nan, dtype=np.float32)
+            for idx in range(1, self.n_windows):
+                pred_raw = preds[idx]  # shape (window_len,)
+                print("pred_raw shape:", pred_raw.shape, "first_5 samples: ",pred_raw[:5])
+                # Format as torch tensor (sensor, 1, window_len)
+                if sensor in self.sensors_100hz:
+                    tensor = torch.zeros((7, 1, 1000), dtype=torch.float32)
+                    tensor[sensor_idx, 0, :] = torch.from_numpy(pred_raw)
+                    hl, _ = extract_cycle_features(tensor, torch.zeros((2,1,100)), torch.zeros((8,1,10)), 0.0)
+                    feats_238 = hl[0]
+                    start, end = sensor_idx*14, (sensor_idx+1)*14
+                    feats = safe_slice(feats_238, start, end, 14)
+                elif sensor in self.sensors_10hz:
+                    si = sensor_idx - 7
+                    tensor = torch.zeros((2, 1, 100), dtype=torch.float32)
+                    tensor[si, 0, :] = torch.from_numpy(pred_raw)
+                    hl, _ = extract_cycle_features(torch.zeros((7,1,1000)), tensor, torch.zeros((8,1,10)), 0.0)
+                    feats_238 = hl[0]
+                    start, end = 7*14 + si*14, 7*14 + (si+1)*14
+                    feats = safe_slice(feats_238, start, end, 14)
+                else:
+                    si = sensor_idx - 9
+                    tensor = torch.zeros((8, 1, 10), dtype=torch.float32)
+                    tensor[si, 0, :] = torch.from_numpy(pred_raw)
+                    hl, _ = extract_cycle_features(torch.zeros((7,1,1000)), torch.zeros((2,1,100)), tensor, 0.0)
+                    feats_238 = hl[0]
+                    start, end = (7+2)*14 + si*14, (7+2)*14 + (si+1)*14
+                    feats = safe_slice(feats_238, start, end, 14)
+                hl_feats[idx, :] = feats
+
+            self.lstm_pred_highlevel_features[sensor_idx] = hl_feats
+            print(f"[LSTM-HL] Done for {sensor}: features shape {hl_feats.shape}, sample {hl_feats[1,:5]}")
 
 
 
@@ -129,72 +227,52 @@ class SensorWindowDataset(Dataset):
         idx: index of the current (present) window (use idx-1 for past)
         missing_sensor_idx: which sensor (0-16) is 'missing'
         """
-
-        # Accept tuple for (idx, missing_sensor_idx)
         if isinstance(idx, tuple) and len(idx) == 2:
             idx, missing_sensor_idx = idx
         else:
             raise ValueError("You must provide both idx and missing_sensor_idx as a tuple (idx, missing_sensor_idx)")
-        # --- Feature indices ---
-        # Previous window
-        features_past = self.features[idx-1]  # shape (17, 14)
-        # Current window
-        features_present = self.features[idx]  # shape (17, 14)
 
-        # Remove missing sensor from present features for input
-        features_present_input = np.delete(features_present, missing_sensor_idx, axis=0)  # shape (16, 14)
-        # Target: present window features of missing sensor
-        features_present_target = features_present[missing_sensor_idx]  # shape (14,)
+        # LSTM-predicted present window (for missing sensor)
+        lstm_pred = self.lstm_pred_raw[missing_sensor_idx][idx]
+        # LR-predicted present features for missing sensor
+        lr_pred = self.lr_pred_features[idx, missing_sensor_idx, :]
 
-        # --- Raw data: indices ---
-        d100_past = self.data_100[idx-1]
-        d10_past  = self.data_10[idx-1]
-        d1_past   = self.data_1[idx-1]
+        # Ground-truth present raw data for missing sensor
+        if missing_sensor_idx < 7:
+            raw_present = self.data_100[idx, missing_sensor_idx, :]
+            raw_present_all = self.data_100[idx].copy()
+            raw_present_all[missing_sensor_idx, :] = np.nan  # simulate missing
 
-        d100_present = self.data_100[idx].copy()
-        d10_present  = self.data_10[idx].copy()
-        d1_present   = self.data_1[idx].copy()
-
-        # Set missing sensor's present raw data to NaN
-        # Find out which group and offset
-        if missing_sensor_idx < 7:  # 100 Hz group
-            d100_present[missing_sensor_idx, :] = np.nan
-            present_raw_target = self.data_100[idx][missing_sensor_idx]
-        elif missing_sensor_idx < 9:  # 10 Hz
+        elif missing_sensor_idx < 9:
+            raw_present_all = self.data_10[idx].copy()
             ms = missing_sensor_idx - 7
-            d10_present[ms, :] = np.nan
-            present_raw_target = self.data_10[idx][ms]
-        else:  # 1 Hz
-            ms = missing_sensor_idx - 9
-            d1_present[ms, :] = np.nan
-            present_raw_target = self.data_1[idx][ms]
+            raw_present = self.data_10[idx, ms, :]
+            raw_present_all[ms, :] = np.nan  # simulate missing
+        else:
+            raw_present_all = self.data_1[idx].copy()
 
-        # --- Input ---
+            ms = missing_sensor_idx - 9
+            raw_present = self.data_1[idx, ms, :]
+            raw_present_all[ms, :] = np.nan
+
+
+        # LSTM high-level features
+        lstm_pred_hl_feat = self.lstm_pred_highlevel_features[missing_sensor_idx][idx]  # shape (14,)
+
+        # Prepare dicts
         input_dict = {
             "missing_sensor_id": missing_sensor_idx,
-            "features_past": features_past.astype(np.float32),          # (17, 14)
-            "features_present_excl_missing": features_present_input.astype(np.float32),  # (16, 14)
-            "raw_past": {
-                "data_100": d100_past.astype(np.float32),
-                "data_10": d10_past.astype(np.float32),
-                "data_1": d1_past.astype(np.float32),
-            },
-            "raw_present_excl_missing": {
-                "data_100": d100_present.astype(np.float32),
-                "data_10": d10_present.astype(np.float32),
-                "data_1": d1_present.astype(np.float32),
-            }
+            "lstm_pred_present": lstm_pred.astype(np.float32),
+            "lstm_pred_present_highlevel": lstm_pred_hl_feat.astype(np.float32),
+            "lr_pred_present": lr_pred.astype(np.float32),
+            "raw_present_excl_missing": raw_present_all.astype(np.float32)
         }
 
-        # --- Target ---
-        target_dict = {
-            "features_present_missing": features_present_target.astype(np.float32),  # (14,)
-            "raw_present_missing": present_raw_target.astype(np.float32),
-        }
+        target = raw_present.astype(np.float32)
 
-        return input_dict, target_dict
+        return input_dict, target
 
-# Example usage:
+# ------------------------
 if __name__ == "__main__":
     BASE_DIR = Path(__file__).resolve().parent.parent
     raw_data_dir = BASE_DIR / "data" / "raw"
@@ -203,6 +281,21 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     dataset = SensorWindowDataset(raw_data_dir, features_path=features_path)
 
+    # For demonstration, let's just print for several sensors/windows
+    # indices_to_check = [ (10, 0), (100, 7), (500, 13), (1000, 16) ]
+    indices_to_check = [ (0, 0), (1, 7), (2, 13) ]
+    
+    for idx, sensor_idx in indices_to_check:
+        inp, tgt = dataset[(idx, sensor_idx)]
+        print(f"\nSample idx={idx}, sensor={dataset.all_sensors[sensor_idx]}")
+        print(f"  missing_sensor_id: {inp['missing_sensor_id']}")
+        print(f"  lstm_pred_present shape: {inp['lstm_pred_present'].shape}  (first 5) {inp['lstm_pred_present'][:5]}")
+        print(f"  lr_pred_present shape: {inp['lr_pred_present'].shape}  (first 5) {inp['lr_pred_present'][:5]}")
+        print(f"  Target raw_present shape: {tgt.shape}  (first 5) {tgt[:5]}")
+
+    # Optionally: Save train/val/test as before, just changing how you batch/process samples as needed
+
+    print("\n[INFO] Sample generation complete.")
     freq_groups = {
         "100hz": list(range(0, 7)),
         "10hz":  list(range(7, 9)),
@@ -214,26 +307,28 @@ if __name__ == "__main__":
             pickle.dump(lst, f)
 
     for group, sensor_idxs in freq_groups.items():
-        all_samples = []
+        train_set, val_set, test_set = [], [], []
         for sensor_idx in sensor_idxs:
+            samples = []
             for idx in range(1, len(dataset)):
-                inp, tgt = dataset[idx, sensor_idx]
-                all_samples.append((inp, tgt))
-        # Shuffle after concatenation
+                inp, tgt = dataset[(idx, sensor_idx)]
+                samples.append((inp, tgt))
+            np.random.seed(42 + sensor_idx)  # different seed per sensor for reproducibility
+            np.random.shuffle(samples)
+            n_total = len(samples)
+            n_train = int(n_total * 0.8)
+            n_val = int(n_total * 0.1)
+            n_test = n_total - n_train - n_val
+            train_set.extend(samples[:n_train])
+            val_set.extend(samples[n_train:n_train + n_val])
+            test_set.extend(samples[n_train + n_val:])
+        # Shuffle after concatenation (for extra randomness)
         np.random.seed(42)
-        np.random.shuffle(all_samples)
-        n_total = len(all_samples)
-        n_train = int(n_total * 0.8)
-        n_val = int(n_total * 0.1)
-        n_test = n_total - n_train - n_val
-        train_set = all_samples[:n_train]
-        val_set = all_samples[n_train:n_train+n_val]
-        test_set = all_samples[n_train+n_val:]
-
+        np.random.shuffle(train_set)
+        np.random.shuffle(val_set)
+        np.random.shuffle(test_set)
         save_pkl(train_set, f"train_{group}")
         save_pkl(val_set, f"val_{group}")
         save_pkl(test_set, f"test_{group}")
-
-        print(f"[{group}] Total: {n_total} | Train: {len(train_set)} | Val: {len(val_set)} | Test: {len(test_set)}")
-
-    print("All splits saved.")
+        print(f"[{group}] Total: {len(train_set) + len(val_set) + len(test_set)} | Train: {len(train_set)} | Val: {len(val_set)} | Test: {len(test_set)}")
+        print(f"Saved {group} datasets to {output_dir}")
