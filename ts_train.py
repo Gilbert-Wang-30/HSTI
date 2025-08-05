@@ -19,9 +19,23 @@ parser.add_argument("--sensor", type=str, default="TS1", help="Sensor to predict
 args = parser.parse_args()
 SENSOR = args.sensor.upper()
 BATCH_SIZE = 32
-EPOCHS = 250
+EPOCHS = 400
 LR = 0.001
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+sensors_100hz = ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"]
+sensors_10hz = ["FS1", "FS2"]
+sensors_1hz  = ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
+if SENSOR in sensors_100hz:
+    SENSOR_FREQ = "100hz"
+    SENSOR_INDEX = sensors_100hz.index(SENSOR)
+elif SENSOR in sensors_10hz:
+    SENSOR_FREQ = "10hz"
+    SENSOR_INDEX = sensors_10hz.index(SENSOR)
+elif SENSOR in sensors_1hz:
+    SENSOR_FREQ = "1hz"
+    SENSOR_INDEX = sensors_1hz.index(SENSOR)
+else:
+    raise ValueError(f"Invalid sensor {SENSOR}. Must be one of: {sensors_100hz + sensors_10hz + sensors_1hz}")
 
 # ----------------- Load Data -----------------
 def load_dataset(path):
@@ -61,43 +75,45 @@ norm_mean, norm_std = get_input_stats(train_data)
 print(f"[Normalization] mean={norm_mean:.4f}, std={norm_std:.4f}")
 
 # ----------------- Collate Function -----------------
-def collate_ts1(batch):
-    X_list, y_list = [], []
-    sensor_groups = {
-        "100hz": ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"],
-        "10hz": ["FS1", "FS2"],
-        "1hz": ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
-    }
-    for (x100, x10, x1), ts1_target in batch:
-        for freq, sensors in sensor_groups.items():
-            if SENSOR in sensors:
-                sensor_index = sensors.index(SENSOR)
-                if freq == "1hz":
-                    full_seq = x1[sensor_index].reshape(-1)
-                elif freq == "10hz":
-                    full_seq = x10[sensor_index].reshape(-1)
-                elif freq == "100hz":
-                    full_seq = x100[sensor_index].reshape(-1)
-                break
-        input_seq = full_seq[:-1].unsqueeze(-1)
-        input_seq = (input_seq - norm_mean) / norm_std
-        y_list.append((ts1_target.unsqueeze(0) - norm_mean) / norm_std)
-        X_list.append(input_seq)
-    return torch.stack(X_list), torch.stack(y_list)
+def collate_ts(batch):
+    sensor_group = SENSOR_FREQ
+    sensor_index = SENSOR_INDEX
+    X_list, Y_list = [], []
+    for (x100, x10, x1), (y100, y10, y1) in batch:
+        if( sensor_group == "100hz"):
+            x1 = x100
+            y1 = y100
+        elif( sensor_group == "10hz"):
+            x1 = x10
+            y1 = y10
+        elif( sensor_group == "1hz"):
+            x1 = x1
+            y1 = y1
+        # x1/y1: shape (8, 10), get sensor_index
+        x_window = x1[sensor_index]  # shape (10,)
+        y_window = y1[sensor_index]  # shape (10,)
+        X_list.append(x_window.unsqueeze(-1))  # (10, 1)
+        Y_list.append(y_window.unsqueeze(-1))  # (10, 1)
+    X = torch.stack(X_list)  # (batch, 10, 1)
+    Y = torch.stack(Y_list)  # (batch, 10, 1)
+    X = (X - norm_mean) / (norm_std + 1e-8)
+    Y = (Y - norm_mean) / (norm_std + 1e-8)
+    return X, Y
 
-train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_ts1)
-dev_loader = DataLoader(dev_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_ts1)
+
+train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_ts)
+dev_loader = DataLoader(dev_data, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_ts)
 
 # ----------------- Model, Loss, Optim -----------------
-model = LSTMModel(input_size=1, hidden_size=64, num_layers=1).to(device)
+model = LSTMModel(input_size=1, hidden_size=128, num_layers=3).to(device)
 criterion = nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 from torch.optim.lr_scheduler import StepLR
-scheduler = StepLR(optimizer, step_size=50, gamma=0.5)
+scheduler = StepLR(optimizer, step_size=30, gamma=0.5)
 
 # ----------------- TensorBoard Setup -----------------
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_dir = f"runs/{SENSOR.lower()}/{run_id}"
+log_dir = f"LSTM_runs/{SENSOR.lower()}/{run_id}"
 writer = SummaryWriter(log_dir=log_dir)
 print(f"TensorBoard logging to: {log_dir}")
 

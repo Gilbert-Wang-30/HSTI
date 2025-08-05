@@ -63,26 +63,31 @@ class missing_data_loader(Dataset):
             reshape_dims = (N, 7, 6, 1000)
         else:
             raise ValueError(f"Sensor {sensor_name} not found in known groups")
-
-        # Copy the last values of sensor (to use as targets) 
-        ts_last_values = channel_data[:, ts_index, -1].astype(np.float32).copy()
-        channel_data[:, ts_index, -1] = np.nan
-
         
         # Reshape each sensor data array into 6 time-window segments (as in original):
 
-        # 100 Hz sensors: reshape 6000 samples into (6 windows × 1000 samples)
-        self.tensor_100 = torch.from_numpy(self.data_100.reshape(N, 7, 6, 1000))
-        # 10 Hz sensors: reshape 600 samples into (6 windows × 100 samples)
-        self.tensor_10  = torch.from_numpy(self.data_10.reshape(N, 2, 6, 100))
-        # 1 Hz sensors: reshape 60 samples into (6 windows × 10 samples)
-        self.tensor_1   = torch.from_numpy(self.data_1.reshape(N, 8, 6, 10))
+        # After loading data_xxx with shapes (N, sensors, T_total)
+        N = self.data_100.shape[0]  # number of cycles
 
-        # Convert target sensor last values to a torch tensor
-        self.ts_last = torch.from_numpy(ts_last_values)  # shape: (N_cycles,)
+        # 100Hz: reshape to (N*6, 7, 1000)
+        self.tensor_100 = torch.from_numpy(
+            self.data_100.reshape(N, 7, 6, 1000)
+        ).permute(0, 2, 1, 3).reshape(-1, 7, 1000)
+
+        # 10Hz: (N*6, 2, 100)
+        self.tensor_10 = torch.from_numpy(
+            self.data_10.reshape(N, 2, 6, 100)
+        ).permute(0, 2, 1, 3).reshape(-1, 2, 100)
+
+        # 1Hz: (N*6, 8, 10)
+        self.tensor_1 = torch.from_numpy(
+            self.data_1.reshape(N, 8, 6, 10)
+        ).permute(0, 2, 1, 3).reshape(-1, 8, 10)
+
 
     def __len__(self):
-        return len(self.ts_last)  # number of cycles
+        # Number of windows (minus 1 for next-window pairing)
+        return self.tensor_1.shape[0] - 1
 
     def __getitem__(self, idx):
         # Retrieve the precomputed sensor data tensors for this cycle
@@ -90,8 +95,10 @@ class missing_data_loader(Dataset):
         x10  = self.tensor_10[idx]    # shape: (2, 6, 100)
         x1   = self.tensor_1[idx]     # shape: (8, 6, 10)
         # Target is the true last sensor reading for this cycle
-        ts_target = self.ts_last[idx]  # shape: (), a 0-dim tensor (scalar)
-        return (x100, x10, x1), ts_target
+        y100 = self.tensor_100[idx + 1]  # shape: (7, 6, 1000)
+        y10  = self.tensor_10[idx + 1]   # shape: (2, 6, 100)
+        y1   = self.tensor_1[idx + 1]    # shape: (8, 6, 10)
+        return (x100, x10, x1), (y100, y10, y1)
 
 # If run as a script, demonstrate dataset usage and create train/dev/test splits
 if __name__ == "__main__":
@@ -108,23 +115,17 @@ if __name__ == "__main__":
     
     # Quick test on a few samples to verify shapes and NaN replacement
     for i in (0, 1, 220):
-        (x100, x10, x1), ts_val = dataset[i]
+        (x100, x10, x1), (y100, y10, y1) = dataset[i]
         print(f"\n[Sample {i}]")
-        print(f"  x100 shape           : {x100.shape} (expect (7, 6, 1000))")
-        print(f"  x10  shape           : {x10.shape}  (expect (2, 6, 100))")
-        print(f"  x1   shape           : {x1.shape}   (expect (8, 6, 10))")
-        # Check that the last target sensor reading in input is NaN and the target is the actual value
-        # Determine the index of the selected sensor within its frequency group
-        if sensor in dataset.sensors_1hz:
-            ts_input_last = x1[dataset.sensors_1hz.index(sensor), -1, -1].item()
-        elif sensor in dataset.sensors_10hz:
-            ts_input_last = x10[dataset.sensors_10hz.index(sensor), -1, -1].item()
-        elif sensor in dataset.sensors_100hz:
-            ts_input_last = x100[dataset.sensors_100hz.index(sensor), -1, -1].item()
-        else:
-            raise ValueError(f"Sensor {sensor} not found in known groups")
-        print(f"  Sensor last input value : {ts_input_last} (should be nan)")
-        print(f"  Sensor target value     : {ts_val.item()}")  # actual last reading that we aim to predict
+        print(f"  x100 shape: {x100.shape} (expect (7, 1000))")
+        print(f"  y100 shape: {y100.shape} (expect (7, 1000))")
+        print(f"  x10  shape: {x10.shape}  (expect (2, 100))")
+        print(f"  y10  shape: {y10.shape}  (expect (2, 100))")
+        print(f"  x1   shape: {x1.shape}   (expect (8, 10))")
+        print(f"  y1   shape: {y1.shape}   (expect (8, 10))")
+        print("First row of x1, first feature:", x1[0, :5].numpy())
+        print("First row of y1, first feature:", y1[0, :5].numpy())
+
 
     # Compute split lengths for train (70%), dev (20%), and test (10%)
     total = len(dataset)

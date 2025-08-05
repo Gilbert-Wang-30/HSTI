@@ -156,7 +156,7 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int, ret
         feats_1   = compute_window_features(windows_1, sampling_rate=1)
 
 
-        # Combine features from all sensor groups along the sensor axis: shape (17, 6, 10)
+        # Combine features from all sensor groups along the sensor axis: shape (17, 6, 14)
         combined_feats = np.concatenate([feats_100, feats_10, feats_1], axis=0)
 
         # Reshape combined features into a (6, 170) matrix:

@@ -9,6 +9,7 @@ __pycache__/*.pyc
 # output directories
 data/processed/   
 data/processed/*.pkl
+data/lstm_predictions/*.npy
 
 data/causality/   
 
