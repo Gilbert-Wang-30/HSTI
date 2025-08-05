@@ -17,9 +17,9 @@ def compute_all_lstm_predictions(data_100, data_10, data_1, model_dir, device="c
     sensors_1hz  = ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]
 
     n_windows = data_100.shape[0]
-    lstm_100 = np.full((n_windows-1, 7, 1000), np.nan, dtype=np.float32)
-    lstm_10  = np.full((n_windows-1, 2, 100), np.nan, dtype=np.float32)
-    lstm_1   = np.full((n_windows-1, 8, 10), np.nan, dtype=np.float32)
+    lstm_100 = np.full((n_windows, 7, 1000), np.nan, dtype=np.float32)
+    lstm_10  = np.full((n_windows, 2, 100), np.nan, dtype=np.float32)
+    lstm_1   = np.full((n_windows, 8, 10), np.nan, dtype=np.float32)
 
     sensor_configs = [
         (sensors_100hz, data_100, lstm_100, 1000),
@@ -29,11 +29,8 @@ def compute_all_lstm_predictions(data_100, data_10, data_1, model_dir, device="c
 
     print(f"[LSTM-PRED] Starting all predictions, device={device}")
 
-
-    
     for sensors, data_arr, lstm_arr, win_len in sensor_configs:
         n_sensors = len(sensors)
-
         for si, sensor in enumerate(sensors):
             # Load model and normalization stats
             model_path = Path(model_dir) / f"{sensor.lower()}_lstm.pth"
@@ -51,17 +48,22 @@ def compute_all_lstm_predictions(data_100, data_10, data_1, model_dir, device="c
             input_windows_norm = (input_windows - norm_mean) / (norm_std + 1e-8)
             num_windows = input_windows_norm.shape[0]
             preds_all = []
-            preds_all.append(np.zeros((win_len), dtype=np.float32))  # Preallocate
-            for i in range(0, num_windows):
-                pred_norm = lstm(input_windows_norm[i])  # (win_len)
-                pred_real = pred_norm.cpu().numpy().squeeze(-1) * norm_std + norm_mean  # (win_len)
+            first_win = input_windows[0].reshape(1, -1)  # Ground truth for the first window
+            print(f" first_win shape: {first_win.shape}, sample: {first_win[0, :5]}")
+            preds_all.append(first_win)  # First window is ground truth
+            for start in range(0, num_windows, BATCH_SIZE_PRED):
+                end = min(start + BATCH_SIZE_PRED, num_windows)
+                batch = torch.tensor(
+                    input_windows_norm[start:end], dtype=torch.float32, device=device
+                ).unsqueeze(-1)  # (batch, win_len, 1)
+                with torch.no_grad():
+                    pred_norm = lstm(batch)  # (batch, win_len, 1)
+                pred_real = pred_norm.cpu().numpy().squeeze(-1) * norm_std + norm_mean  # (batch, win_len)
                 preds_all.append(pred_real)
 
             preds_all = np.concatenate(preds_all, axis=0)  # (num_windows, win_len)
-            print(f"  [{sensor}] Predictions shape: {preds_all.shape}")
             lstm_arr[:, si, :] = preds_all
             print(f"  [{sensor}] Example window 1: {lstm_arr[1, si, :5]}")
-            
         print(f"[LSTM-PRED] Finished for group: {sensors}")
     return lstm_100, lstm_10, lstm_1
 
@@ -113,7 +115,7 @@ if __name__ == "__main__":
     out_dir = ROOT / "data" / "lstm_predictions"
     model_dir = ROOT / "models"
     features_path = ROOT / "features" / "features.pkl"
-    READ_FROM_DISK = False
+    READ_FROM_DISK = True
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
@@ -194,7 +196,7 @@ if __name__ == "__main__":
     # Basic statistics
     print("Mean per feature (first 10):", np.mean(features_matrix, axis=0)[:10])
     print("Std per feature (first 10):", np.std(features_matrix, axis=0)[:10])
-    print("Min/Max overall:", np.min(features_matrix), np.max(features_matrix))
+    print("Min/Max overall:", np.nanmin(features_matrix), np.nanmax(features_matrix))
 
 
 
@@ -223,8 +225,8 @@ if __name__ == "__main__":
         print("Extracted features from saved matrix:", feats_matrix[idx, :10])
         print("Freshly computed features:", feats[:, window_idx][:10])
         diff = np.abs(feats_matrix[idx] - feats[:, window_idx])
-        print("Max diff:", np.max(diff))
-        print("Mean diff:", np.mean(diff))
+        print("Max diff:", np.nanmax(diff))
+        print("Mean diff:", np.nanmean(diff))
 
     # Example usage (after all_feats computed)
     debug_compare_one(100, data_100, data_10, data_1, features_matrix, extract_cycle_features)
