@@ -137,6 +137,10 @@ class SensorWindowDataset(Dataset):
 
         # LSTM high-level features
         lstm_pred_hl_feat = self.lstm_pred_highlevel_features[idx, missing_sensor_idx*14:(missing_sensor_idx+1)*14]  # shape (14,)
+        
+        # Actual features
+        actual_feat = self.features[idx, missing_sensor_idx, :]  # shape (14,)
+        assert(actual_feat.shape == (14,)  )
 
         # Prepare dicts
         input_dict = {
@@ -144,6 +148,7 @@ class SensorWindowDataset(Dataset):
             "lstm_pred_present": lstm_pred.astype(np.float32),
             "lstm_pred_present_highlevel": lstm_pred_hl_feat.astype(np.float32),
             "lr_pred_present": lr_pred.astype(np.float32),
+            "actual_present": actual_feat.astype(np.float32),
             "raw_present_excl_missing": raw_present_all.astype(np.float32)
         }
 
