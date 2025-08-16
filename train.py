@@ -1,190 +1,324 @@
 # train.py
+# -*- coding: utf-8 -*-
 
-# ─── Imports ─────────────────────────────────────────────────────────────
-import yaml
-import pickle
-import os
+import os, math, time, yaml, pickle
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, List, Tuple
+
 import torch
 import torch.nn as nn
-from pathlib import Path
 from torch.utils.data import DataLoader
-from models.stgcn import STGCN
-from models.ll import MultiTaskModel  # Assuming this is a simple linear layer model for testing
-from datasets.data_loader import data_loader
 from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
+from datasets.stgcn_data_loader import STGCNDataset  
 
-
-# ─── Configuration & Hyperparameters ─────────────────────────────────────
+# dataset pickles are the same ones used by stgcn_train.py
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / 'config' / 'train.yaml'
-with open(CONFIG_PATH, 'r') as f:
-    config = yaml.safe_load(f)
 
-batch_size = config.get('batch_size', 16)
-learning_rate = config.get('learning_rate', 1e-3)
-epochs = config.get('epochs', 10)
-hidden_channels = config.get('hidden_channels', 64)
-num_nodes = config.get('num_nodes', 17)
-time_steps = config.get('time_steps', 6)
-optim_name = config.get('optimizer', 'AdamW')         # e.g., "Adam" or "SGD"
-input_type = config.get('input_type', 'raw_data')  # e.g., "raw_data" or "processed"
+from models.ll import MultiTaskLL  # <— the LL baseline
 
+# -----------------------
+# Utilities
+# -----------------------
+def load_yaml_config(default_cfg: Dict[str, Any], yaml_path: Path) -> Dict[str, Any]:
+    cfg = default_cfg.copy()
+    if yaml_path.exists():
+        with open(yaml_path, "r") as f:
+            user_cfg = yaml.safe_load(f) or {}
+        cfg.update(user_cfg)
+    return cfg
 
-# ─── TensorBoard Logging Setup ───────────────────────────────────────────
-run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-if( input_type == 'raw_data'):
-    log_dir = BASE_DIR / 'runs' / 'raw_data_experiment' / run_id
-else:
-    log_dir = BASE_DIR / 'runs' / 'high_level_data_experiment' / run_id
-writer = SummaryWriter(log_dir=str(log_dir))
-print("TensorBoard log path:", writer.log_dir)
+def seed_everything(seed: int) -> None:
+    import random, numpy as np
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
+@torch.no_grad()
+def macro_precision_from_logits(logits: torch.Tensor, targets: torch.Tensor, num_classes: int) -> float:
+    preds = logits.argmax(dim=1)
+    precs, eps = [], 1e-8
+    for c in range(num_classes):
+        tp = ((preds == c) & (targets == c)).sum().item()
+        fp = ((preds == c) & (targets != c)).sum().item()
+        precs.append(tp / (tp + fp + eps))
+    return float(sum(precs) / len(precs))
 
-# ─── Load Dataset ────────────────────────────────────────────────────────
-with open('data/processed/train.pkl', 'rb') as f:
-    train_dataset = pickle.load(f)
+def _check_finite(tag: str, t: torch.Tensor):
+    if not torch.isfinite(t).all():
+        bad = (~torch.isfinite(t)).nonzero(as_tuple=False)
+        print(f"[NaN/Inf] in {tag} at indices: {bad[:5].tolist()} ...")
+        raise RuntimeError(f"{tag} contains NaN/Inf")
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-with open('data/processed/val.pkl', 'rb') as f:
-    dev_dataset = pickle.load(f)
-dev_loader = DataLoader(dev_dataset, batch_size=batch_size, shuffle=False)
+# -----------------------
+# Training / Eval
+# -----------------------
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    status_classes: List[int],
+    rul_weight: float,
+    status_weight: float,
+    scaler: torch.cuda.amp.GradScaler = None,
+    scheduler: torch.optim.lr_scheduler._LRScheduler = None,
+    grad_clip: float = 0.0,
+) -> Tuple[float, float, List[float], List[float]]:
+    model.train()
+    mse_loss_fn = nn.MSELoss()
+    ce_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.05)
 
-# ─── Load Adjacency Matrix ───────────────────────────────────────────────
-file_path = BASE_DIR / 'data' / 'causality' / 'pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl'
-if not os.path.exists(file_path):
-    raise FileNotFoundError(f"No file found at {file_path}")
-with open(file_path, "rb") as f:
-    matrix = pickle.load(f)
-adjacency_matrix = torch.tensor(matrix, dtype=torch.float32)  # Convert to tensor
+    ce_sums = [0.0 for _ in status_classes]
+    total_loss = total_mse = 0.0
+    prec_sums = [0.0 for _ in status_classes]
+    num_batches = 0
 
+    for x, rul, status in loader:
+        x = x.to(device, non_blocking=True)                   # (N,C,T,V)
+        rul = rul.to(device, non_blocking=True).float().view(-1, 1)
+        status = status.to(device, non_blocking=True).long()
 
-# ─── Initialize Model ────────────────────────────────────────────────────
-status_classes = [3, 4, 3, 4]
-if( input_type == 'raw_data'):
-    model = MultiTaskModel(43680, status_classes)
-else:
-    model = MultiTaskModel(1020, status_classes)  # Example: input features = 1020, output = 1 (RUL value)
-model.train()  # set model to training mode (optional since new model is train by default)
+        optimizer.zero_grad(set_to_none=True)
+        _check_finite("x", x)
 
-# ─── Optimizer & Loss ────────────────────────────────────────────────────
-if optim_name.lower() == 'sgd':
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-else:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-9)
+        if scaler is not None:
+            with torch.amp.autocast(device_type="cuda"):
+                out = model(x)
+                rul_pred = out["rul"]
+                logits_list = out["status_logits"]
+                _check_finite("rul_pred", rul_pred)
+                for i, logits in enumerate(logits_list):
+                    _check_finite(f"status_logits[{i}]", logits)
 
-# Set up loss function
-criterion_rul = nn.MSELoss()
-criterion_status = nn.CrossEntropyLoss()
-
-
-best_val_loss = -1  # initialize with a large number
-if( input_type == 'raw_data'):
-    # For raw data, we assume the model is a simple linear layer model
-    best_model_path = 'models/best_raw_model.pth'
-else:
-    best_model_path = 'models/best_ll_model.pth'
-
-# ─── Training Loop ───────────────────────────────────────────────────────
-for epoch in range(epochs):
-    model.train()  # set model to training mode
-    total_rul_loss = 0.0
-    correct_status = [0, 0, 0, 0]
-    total_samples = 0
-
-    for batch in train_loader:
-        # Assuming each batch is a tuple (inputs, targets)
-        (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
-        if input_type == 'raw_data':
-            # For raw data, we use the concatenated tensors as input
-            inputs = torch.cat((tensor_100.flatten(start_dim=1), tensor_10.flatten(start_dim=1), tensor_1.flatten(start_dim=1)), dim=1)
+                loss_rul = mse_loss_fn(rul_pred, rul)
+                loss_status = 0.0
+                for i, num_cls in enumerate(status_classes):
+                    ce = ce_loss_fn(logits_list[i], status[:, i])
+                    ce_sums[i] += float(ce.item())
+                    loss_status = loss_status + ce
+                loss = rul_weight * loss_rul + status_weight * loss_status
         else:
-            inputs = features  # Use features as input to the model
-        inputs = inputs.flatten(start_dim=1)  # Flatten features to shape (batch_size, feature_dim)
-        inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
+            out = model(x)
+            rul_pred = out["rul"]
+            logits_list = out["status_logits"]
+            loss_rul = mse_loss_fn(rul_pred, rul)
+            loss_status = 0.0
+            for i, num_cls in enumerate(status_classes):
+                ce = ce_loss_fn(logits_list[i], status[:, i])
+                ce_sums[i] += float(ce.item())
+                loss_status = loss_status + ce
+            loss = rul_weight * loss_rul + status_weight * loss_status
 
-        # Forward pass
-        rul_pred, status_logits, _ = model(inputs)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if grad_clip and grad_clip > 0:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer); scaler.update()
+        else:
+            loss.backward()
+            if grad_clip and grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
-        # loss computation
-        rul_loss = criterion_rul(rul_pred, rul_value)
-        status_losses = [
-            criterion_status(logits, status_value[:, j].long())
-            for j, logits in enumerate(status_logits)
-        ]
+        if scheduler is not None:
+            scheduler.step()
 
+        total_loss += float(loss.item())
+        total_mse  += float(loss_rul.item())
+        for i, num_cls in enumerate(status_classes):
+            prec_sums[i] += macro_precision_from_logits(logits_list[i].detach(), status[:, i], num_cls)
+        num_batches += 1
 
-        total_loss = rul_loss + sum(status_losses)
+    avg_loss = total_loss / max(1, num_batches)
+    avg_mse  = total_mse  / max(1, num_batches)
+    avg_precs = [p / max(1, num_batches) for p in prec_sums]
+    avg_ces   = [c / max(1, num_batches) for c in ce_sums]
+    return avg_loss, avg_mse, avg_precs, avg_ces
 
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    status_classes: List[int],
+    rul_weight: float,
+    status_weight: float,
+) -> Tuple[float, float, List[float], float, List[float]]:
 
-        # Backward pass and optimization step
-        
-        total_rul_loss += rul_loss.item()
-        total_samples += rul_value.size(0)
-
-        for j, logits in enumerate(status_logits):
-            preds = logits.argmax(dim=1)
-            correct_status[j] += (preds == status_value[:, j].long()).sum().item()
-
-
-    
-    # print average loss for the epoch for monitoring
-    avg_train_rul_loss = total_rul_loss / len(train_loader)
-    precision_train = [correct / total_samples for correct in correct_status]
-
-    writer.add_scalar('rul_loss/train', avg_train_rul_loss, epoch)
-    for j in range(4):
-        writer.add_scalar(f'status{j}_precision/train', precision_train[j], epoch)
-
-
-    # Validation step
     model.eval()
-    val_rul_loss = 0.0
-    correct_status_val = [0, 0, 0, 0]
-    total_val_samples = 0
+    mse_loss_fn = nn.MSELoss()
+    ce_loss_fn  = nn.CrossEntropyLoss(label_smoothing=0.05)
 
-    with torch.no_grad():
-        for batch in dev_loader:
-            (tensor_100, tensor_10, tensor_1), features, rul_value, status_value = batch
-            if input_type == 'raw_data':
-                inputs = torch.cat((tensor_100.flatten(start_dim=1),
-                                tensor_10.flatten(start_dim=1),
-                                tensor_1.flatten(start_dim=1)), dim=1)
-            else:
-                inputs = features.flatten(start_dim=1)
-            inputs = torch.nan_to_num(inputs, nan=0.0, posinf=1e3, neginf=-1e3)
+    ce_sums = [0.0 for _ in status_classes]
+    total_loss = total_mse = 0.0
+    prec_sums = [0.0 for _ in status_classes]
+    num_batches = 0
 
-            rul_pred, status_logits, _ = model(inputs)
-            val_rul_loss += criterion_rul(rul_pred, rul_value).item()
-            total_val_samples += rul_value.size(0)
+    for x, rul, status in loader:
+        x = x.to(device, non_blocking=True)
+        rul = rul.to(device, non_blocking=True).float().view(-1, 1)
+        status = status.to(device, non_blocking=True).long()
 
-            for j, logits in enumerate(status_logits):
-                preds = logits.argmax(dim=1)
-                correct_status_val[j] += (preds == status_value[:, j].long()).sum().item()
+        out = model(x)
+        rul_pred = out["rul"]
+        logits_list = out["status_logits"]
 
-    avg_val_rul_loss = val_rul_loss / len(dev_loader)
-    precision_val = [correct / total_val_samples for correct in correct_status_val]
-    # Save best model based on validation loss
-    if sum(precision_val) > best_val_loss:
-        best_val_loss = sum(precision_val)
-        torch.save(model.state_dict(), best_model_path)
-        print(f"Best model saved at epoch {epoch+1} with val precision sum: {best_val_loss:.4f}")
+        loss_rul = mse_loss_fn(rul_pred, rul)
+        loss_status = 0.0
+        for i, num_cls in enumerate(status_classes):
+            ce = ce_loss_fn(logits_list[i], status[:, i])
+            ce_sums[i] += float(ce.item())
+            loss_status = loss_status + ce
 
+        loss = rul_weight * loss_rul + status_weight * loss_status
 
-    writer.add_scalar('rul_loss/val', avg_val_rul_loss, epoch)
-    for j in range(4):
-        writer.add_scalar(f'status{j}_precision/val', precision_val[j], epoch)
+        total_loss += float(loss.item())
+        total_mse  += float(loss_rul.item())
+        for i, num_cls in enumerate(status_classes):
+            prec_sums[i] += macro_precision_from_logits(logits_list[i], status[:, i], num_cls)
+        num_batches += 1
 
-    print(f"Epoch {epoch+1}/{epochs}, RUL Loss: {avg_train_rul_loss:.4f}, " +
-          " ".join([f"S{j}_Prec: {precision_train[j]*100:.1f}%" for j in range(4)]))
+    avg_loss = total_loss / max(1, num_batches)
+    avg_mse  = total_mse  / max(1, num_batches)
+    avg_precs = [p / max(1, num_batches) for p in prec_sums]
+    avg_ces   = [c / max(1, num_batches) for c in ce_sums]
+    rmse_val = math.sqrt(avg_mse) if avg_mse >= 0.0 else float('nan')
+    return avg_loss, avg_mse, avg_precs, rmse_val, avg_ces
 
-# ─── Save Trained Model ───
-model_save_path = 'models/ll_trained.pth'
-torch.save(model.state_dict(), model_save_path)
-print(f"Model saved to {model_save_path}")
+# -----------------------
+# Main
+# -----------------------
+def main():
+    default_cfg = {
+        "seed": 42,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "batch_size": 64,
+        "epochs": 5000,                 # match your ST-GCN long run
+        "lr": 3e-4,
+        "weight_decay": 1e-4,
+        "grad_clip": 1.0,
+        "use_amp": False,
+        "val_every": 1,
+        "status_classes": [3, 4, 3, 4],
+        "in_channels": 24,
+        "T": 6,
+        "V": 17,
+        "dropout": 0.2,                 # same as heads in ST-GCN
+        "rul_weight": 1.0,
+        "status_weight": 1.0,
+        "num_workers": 4,
+        "pin_memory": True,
+        # paths (same pickles as stgcn_train.py)
+        "train_pkl": str(BASE_DIR / "data" / "processed" / "train_stgcn.pkl"),
+        "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
+        "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
+        "run_root":  str(BASE_DIR / "runs" / "ll_experiment"),  # tags are same; dir is different
+        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "ll"),
+    }
 
-writer.flush()
-writer.close()
+    cfg_path = BASE_DIR / "configs" / "ll.yaml"
+    cfg = load_yaml_config(default_cfg, cfg_path)
+
+    seed_everything(cfg["seed"])
+    torch.autograd.set_detect_anomaly(True)
+    device = torch.device(cfg["device"])
+
+    # logging dirs
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(cfg["run_root"]) / run_id
+    ckpt_dir = Path(cfg["ckpt_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(log_dir))
+    print("TensorBoard:", writer.log_dir)
+
+    # data
+    with open(cfg["train_pkl"], "rb") as f: train_dataset = pickle.load(f)
+    with open(cfg["val_pkl"],   "rb") as f: val_dataset   = pickle.load(f)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=cfg["batch_size"],
+        shuffle=True, num_workers=cfg["num_workers"], pin_memory=cfg["pin_memory"]
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=cfg["batch_size"], shuffle=False,
+        num_workers=cfg["num_workers"], pin_memory=cfg["pin_memory"]
+    )
+
+    # model
+    status_classes: List[int] = cfg["status_classes"]
+    model = MultiTaskLL(
+        in_channels=cfg["in_channels"], T=cfg["T"], V=cfg["V"],
+        status_classes=status_classes, dropout=cfg["dropout"]
+    ).to(device)
+
+    # optimizer & scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    steps_per_epoch = len(train_loader)
+    total_steps = cfg["epochs"] * steps_per_epoch
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    scaler = torch.amp.GradScaler("cuda", enabled=(cfg["use_amp"] and device.type == "cuda"))
+
+    # train
+    best_val_loss = float("inf")
+    for epoch in range(cfg["epochs"]):
+        t0 = time.time()
+        tr_loss, tr_mse, tr_precs, tr_ce = train_one_epoch(
+            model, train_loader, optimizer, device,
+            status_classes=status_classes,
+            rul_weight=cfg["rul_weight"], status_weight=cfg["status_weight"],
+            scaler=scaler, scheduler=scheduler, grad_clip=cfg["grad_clip"]
+        )
+        va_loss, va_mse, va_precs, va_rmse, va_ce = evaluate(
+            model, val_loader, device,
+            status_classes=status_classes,
+            rul_weight=cfg["rul_weight"], status_weight=cfg["status_weight"]
+        )
+
+        # TensorBoard — SAME TAGS as stgcn_train.py so curves overlay
+        writer.add_scalar("total_loss/train_total", tr_loss, epoch)
+        writer.add_scalar("total_loss/val_total",   va_loss, epoch)
+        writer.add_scalar("rul_loss/train",         tr_mse,  epoch)
+        writer.add_scalar("rul_loss/val",           va_mse,  epoch)
+        writer.add_scalar("rul_loss/rmse_val",      va_rmse, epoch)
+        for i, p in enumerate(tr_precs):
+            writer.add_scalar(f"status{i}_precision/train", p, epoch)
+            writer.add_scalar(f"status{i}_ce/train", tr_ce[i], epoch)
+        for i, p in enumerate(va_precs):
+            writer.add_scalar(f"status{i}_precision/val", p, epoch)
+            writer.add_scalar(f"status{i}_ce/val",   va_ce[i], epoch)
+        writer.add_scalar("status_ce/train_sum", sum(tr_ce), epoch)
+        writer.add_scalar("status_ce/val_sum",   sum(va_ce), epoch)
+        writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
+
+        dt = time.time() - t0
+        prec_str = " ".join([f"S{i}_P:{va_precs[i]*100:.1f}%" for i in range(len(status_classes))])
+        print(f"Epoch {epoch+1:04d}/{cfg['epochs']}: "
+              f"train_loss={tr_loss:.4f} val_loss={va_loss:.4f} "
+              f"val_RMSE={va_rmse:.4f} {prec_str} ({dt:.1f}s)")
+
+        if va_loss < best_val_loss:
+            best_val_loss = va_loss
+            best_path = ckpt_dir / "ll_best.pt"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "cfg": cfg,
+                    "best_val_loss": best_val_loss,
+                },
+                best_path,
+            )
+            print(f"  ↳ saved best checkpoint to {best_path}")
+
+    writer.flush(); writer.close()
+
+if __name__ == "__main__":
+    main()

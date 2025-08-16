@@ -1,41 +1,60 @@
+# models/ll.py
+# -*- coding: utf-8 -*-
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import List, Sequence
 
+class MultiTaskLL(nn.Module):
+    """
+    Fully-connected baseline for ST-GCN comparison.
+    Accepts x with shape (N, C, T, V), flattens to (N, C*T*V), then MLP.
+    Returns:
+      {
+        "rul": (N, 1)  in [0,1]  (Sigmoid),
+        "status_logits": [ (N, Ci), ... ] raw logits (NO softmax)
+      }
+    """
+    def __init__(
+        self,
+        in_channels: int = 24,
+        T: int = 6,
+        V: int = 17,
+        status_classes: List[int] = (3, 4, 3, 4),
+        shared_layers: Sequence[int] = (512, 256),
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        in_features = in_channels * T * V
 
-class MultiTaskModel(nn.Module):
-    def __init__(self, in_features, status_classes):
-        super(MultiTaskModel, self).__init__()
-        # Shared layers
-        self.shared_net = nn.Sequential(
-            nn.Linear(in_features, 500),
-            nn.ReLU(),
-            nn.Dropout(0.2),  # Dropout layer to prevent overfitting
-            nn.Linear(500, 250),
-            nn.ReLU()
+        # Shared MLP trunk
+        layers = []
+        prev = in_features
+        for h in shared_layers:
+            layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(dropout)]
+            prev = h
+        self.shared = nn.Sequential(*layers)
+        trunk_dim = prev  # last shared width
+
+        # RUL head (mirrors stgcn head: hidden 256 + Sigmoid)
+        self.rul_head = nn.Sequential(
+            nn.Linear(trunk_dim, 256), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(256, 1), nn.Sigmoid()
         )
-        # RUL head
-        self.rul_head = nn.Linear(250, 1)
-        # Status classification heads (one linear layer per status)
+
+        # 4 status heads -> RAW LOGITS (no softmax)
         self.status_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(250, 300),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(300, 50),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(50, num_classes)
-            ) for num_classes in status_classes
+                nn.Linear(trunk_dim, 256), nn.ReLU(), nn.Dropout(dropout),
+                nn.Linear(256, n_cls)
+            ) for n_cls in status_classes
         ])
-        # (Each status_head will output logits for that status's classes)
 
-
-
-    def forward(self, x):
-        features = self.shared_net(x)  # output shape: (batch_size, 50)
-        rul_output = self.rul_head(features).squeeze(-1)  # RUL output shape: (batch,)
-        # Compute logits for each status head
-        status_logits = [head(features) for head in self.status_heads]  # list of tensors
-        status_probs = [F.softmax(logit, dim=1) for logit in status_logits]
-        return rul_output, status_logits, status_probs
+    def forward(self, x: torch.Tensor):
+        # x: (N, C, T, V) -> (N, C*T*V)
+        x = x.view(x.size(0), -1)
+        z = self.shared(x)
+        rul = self.rul_head(z)  # (N,1) in [0,1]
+        status_logits = [head(z) for head in self.status_heads]  # raw logits
+        return {"rul": rul, "status_logits": status_logits}
