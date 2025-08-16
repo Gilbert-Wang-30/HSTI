@@ -2,6 +2,7 @@ import os
 import numpy as np
 import torch
 from scipy.stats import skew, kurtosis
+EPS = 1e-12
 
 def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int, return_psd0_count=False):
     """
@@ -87,12 +88,19 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int, ret
             sensor_feats = []
             for window in range(W):
                 data = window_data[sensor, window, :]
+                # Common checks
+                std = np.std(data)
+                is_const = std < EPS
 
                 # Time domain features
                 median = np.median(data)
                 iqr = np.percentile(data, 75) - np.percentile(data, 25)
-                skewness = skew(data)
-                kurt = kurtosis(data)
+                if is_const:
+                    skewness = 0.0
+                    kurt = 0.0
+                else:
+                    skewness = float(skew(data, bias=False))
+                    kurt = float(kurtosis(data, fisher=True, bias=False))
                 mad = np.median(np.abs(data - median))
                 zero_cross_rate = np.mean(np.diff(np.sign(data - np.mean(data))) != 0)
                 autocorr_1 = np.corrcoef(data[:-1], data[1:])[0, 1] if np.std(data) > 1e-8 else 0.0
@@ -128,7 +136,8 @@ def extract_high_level_features(data_dir: str, start_idx: int, end_idx: int, ret
                     spec_centroid, spec_bandwidth, spec_entropy,
                     *band_energy_ratios, spec_flatness
                 ]
-
+                # Final safety at feature-vector level:
+                window_feats = np.nan_to_num(window_feats, nan=0.0, posinf=1e4, neginf=-1e4)
                 sensor_feats.append(window_feats)
 
             features.append(sensor_feats)

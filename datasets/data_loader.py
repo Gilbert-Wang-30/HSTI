@@ -58,10 +58,10 @@ class data_loader(Dataset):
         # Pre-compute windowed tensors for each frequency band
         N = self.data_100.shape[0]  # number of cycles
         features_matrix, _ = extract_high_level_features(data_dir, start_idx=0, end_idx=N-1)
-        # `features_matrix` shape is (6 * N, 170) because the function stacks 6 windows per cycle vertically.
-        # Reshape it to (N, 6, 170) where each cycle has 6 windows × 170 features:
-        features_matrix = features_matrix.reshape(N, 6, 170)
-        # Transpose to shape (N, 170, 6) so that each cycle's feature matrix matches (170 features × 6 windows):
+        # `features_matrix` shape is (6 * N, 238) because the function stacks 6 windows per cycle vertically.
+        # Reshape it to (N, 6, 238) where each cycle has 6 windows × 238 features:
+        features_matrix = features_matrix.reshape(N, 6, 238)
+        # Transpose to shape (N, 238, 6) so that each cycle's feature matrix matches (238 features × 6 windows):
         features_matrix = features_matrix.transpose(0, 2, 1)
         # Convert to torch tensor
         self.features = torch.from_numpy(features_matrix.astype(np.float32))

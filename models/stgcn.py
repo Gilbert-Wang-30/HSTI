@@ -22,7 +22,7 @@ Adjacency:
         K: number of partitions (e.g., 3: self, inward, outward)
 """
 
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -228,7 +228,7 @@ class STGCN(nn.Module):
     """
     def __init__(self,
                  A: torch.Tensor,
-                 status_classes: list[int],
+                 status_classes: List[int],
                  in_channels: int = 24,
                  channels: Sequence[int] = (64, 32, 10),
                  temporal_kernel: Sequence[int] = (3,3,2),
@@ -255,7 +255,8 @@ class STGCN(nn.Module):
             c_prev = c_out
         self.backbone = nn.Sequential(*blocks)
 
-        self.attention = nn.MultiheadAttention(embed_dim=c_prev, num_heads=1, dropout=0.1 , batch_first=True)
+        self.attn_norm = nn.LayerNorm(c_prev)
+        self.attention = nn.MultiheadAttention(embed_dim=c_prev, num_heads=1, dropout=0.0 , batch_first=True)
         # self attention result shape (N, V, C_last/C_prev)
         
         hidden = 256
@@ -298,6 +299,10 @@ class STGCN(nn.Module):
 
         # Attention expects (N, V, C_last) since batch_first=True
         x_nodes = x.permute(0, 2, 1).contiguous()          # (N, V, C_last)
+
+        # stabilize attention
+        x_nodes = self.attn_norm(x_nodes)                         # (N, V, C_last)
+        x_nodes = torch.nan_to_num(x_nodes, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # Self-attention: q = k = v
         x_attn, _= self.attention(x_nodes, x_nodes, x_nodes)  # x_attn: (N, V, C_last)
