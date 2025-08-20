@@ -1,0 +1,27 @@
+# configs/tcn.yaml
+model: tcn
+# core training
+epochs: 5000
+batch_size: 64
+lr: 3e-4
+weight_decay: 1e-4
+grad_clip: 1.0
+use_amp: false
+num_workers: 4
+pin_memory: true
+# task
+status_classes: [3, 4, 3, 4]
+rul_weight: 1.0
+status_weight: 1.0
+# data
+in_channels: 24
+T: 6
+# TCN-specific
+# If you omit tcn_channels it will fall back to `channels`
+tcn_channels: [64, 32, 10]
+tcn_dilations: [1, 2, 4]
+tcn_kernel: 3
+tcn_dropout: 0.1
+tcn_causal: false
+# (optional) keep for fallback compatibility
+channels: [64, 32, 10]

@@ -15,19 +15,20 @@ This mirrors a typical train.py structure but targets the ST-GCN model:
 - Weighted multi-task loss: MSE for RUL + CrossEntropy for 4 status heads
 - Checkpointing best model by validation loss
 
-Folder layout (assumed):
-  .
-  ├── models/
-  │   └── stgcn.py            (your STGCN model)
-  ├── datasets/
-  │   └── stgcn_data_loader.py
-  ├── data/
-  │   └── processed/
-  │       ├── train_stgcn.pkl
-  │       ├── val_stgcn.pkl
-  │       └── test_stgcn.pkl
-  └── configs/
-      └── stgcn.yaml          (optional)
+Folder layout:
+HSTI/
+├─ stgcn_train.py
+├─ configs/
+│  └─ stgcn.yaml
+├─ datasets/
+│  └─ stgcn_data_loader.py
+└─ models/
+   ├─ stgcn.py
+   ├─ stgcn_no_attention.py        
+   ├─ tcn.py                     
+   ├─ dcrnn.py                       
+   └─ inception_time.py              
+
 
 """
 
@@ -47,8 +48,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets.stgcn_data_loader import STGCNDataset  
-
-from models.stgcn import STGCN  # adjust import if your path differs
 
 
 # -----------------------
@@ -181,6 +180,103 @@ def make_partitioned_adj_from_specs(
     # --- stack K=3 ---
     A = torch.stack([A_self, A_freq, A_corr], dim=0)  # (3, V, V)
     return A
+
+
+# -----------------------
+# Model factory (added)
+# -----------------------
+def _model_needs_graph(name: str) -> bool:
+    name = name.lower()
+    return name in ("stgcn", "stgcn_no_attention", "dcrnn")
+
+def build_model(cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = None) -> nn.Module:
+    """
+    Factory: returns a model with the common interface:
+      forward(x) -> {"rul": (N,1), "status_logits": [ ... ]}
+    """
+    name = cfg.get("model", "stgcn").lower()
+    status_classes = cfg["status_classes"]
+    in_channels = cfg["in_channels"]
+    V = 17
+    T = cfg.get("T", 6)
+
+    if name == "stgcn":
+        from models.stgcn import STGCN
+        model = STGCN(
+            A=A,
+            status_classes=status_classes,
+            in_channels=in_channels,
+            channels=tuple(cfg["channels"]),
+            temporal_kernel=tuple(cfg["temporal_kernel"]),
+            dropout=cfg["dropout"],
+            edge_importance=cfg["edge_importance"],
+        )
+
+    elif name == "stgcn_no_attention":
+        from models.stgcn_no_attention import STGCN_NoAttention
+        model = STGCN_NoAttention(
+            A=A,
+            status_classes=status_classes,
+            in_channels=in_channels,
+            channels=tuple(cfg["channels"]),
+            temporal_kernel=tuple(cfg["temporal_kernel"]),
+            dropout=cfg["dropout"],
+            edge_importance=cfg["edge_importance"],
+        )
+
+    elif name == "tcn":
+        from models.tcn import TCNBackbone
+        tcn_channels = tuple(cfg.get("tcn_channels", cfg["channels"]))
+        dilations    = tuple(cfg.get("tcn_dilations", [1, 2, 4]))
+        kernel_size  = int(cfg.get("tcn_kernel", 3))
+        dropout      = float(cfg.get("tcn_dropout", 0.1))
+        causal       = bool(cfg.get("tcn_causal", False))
+        model = TCNBackbone(
+            status_classes=status_classes,
+            in_channels=in_channels,
+            V=V,
+            tcn_channels=tcn_channels,
+            kernel_size=kernel_size,
+            dilations=dilations,
+            dropout=dropout,
+            causal=causal,
+            head_hidden=256,
+            head_dropout=0.2,
+            pool="mean",
+        )
+
+    elif name == "dcrnn":
+        from models.dcrnn import DCRNNBackbone
+        model = DCRNNBackbone(
+            A=A,
+            in_channels=in_channels,
+            T=T, V=V,
+            status_classes=status_classes,
+            hidden=cfg.get("dcrnn_hidden", 64),
+            num_layers=cfg.get("dcrnn_layers", 2),
+            k=cfg.get("dcrnn_k", 1),
+            head_hidden=256, head_dropout=0.2,
+        )
+
+    elif name == "inception_time":
+        from models.inception_time import InceptionTimeBackbone
+        model = InceptionTimeBackbone(
+            in_channels=in_channels,
+            V=V, T=T,
+            status_classes=status_classes,
+            nb_filters=cfg.get("it_filters", 32),
+            depth=cfg.get("it_depth", 6),
+            bottleneck_channels=cfg.get("it_bottleneck", 32),
+            kernel_sizes=tuple(cfg.get("it_kernels", [3, 5, 7])),
+            head_hidden=256, head_dropout=0.2,
+            pool="mean",
+        )
+
+    else:
+        raise ValueError(f"Unknown model '{name}'. Expected one of "
+                         "stgcn | stgcn_no_attention | tcn | dcrnn | inception_time")
+
+    return model.to(device)
 
 
 # -----------------------
@@ -381,8 +477,27 @@ def main():
         "train_pkl": str(BASE_DIR / "data" / "processed" / "train_stgcn.pkl"),
         "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
         "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
-        "run_root":  str(BASE_DIR / "runs" / "stgcn_experiment"),
+        "run_root":  str(BASE_DIR / "runs"),
         "ckpt_dir":  str(BASE_DIR / "checkpoints" / "stgcn"),
+        # added
+        "model": "stgcn",
+        "T": 6,
+        # optional alt-model params
+        # TCN
+        "tcn_channels": [64, 32, 10],
+        "tcn_dilations": [1, 2, 4],
+        "tcn_kernel": 3,
+        "tcn_dropout": 0.1,
+        "tcn_causal": False,
+        # DCRNN
+        "dcrnn_hidden": 64,
+        "dcrnn_layers": 2,
+        "dcrnn_k": 1,
+        # InceptionTime
+        "it_filters": 32,
+        "it_depth": 6,
+        "it_bottleneck": 32,
+        "it_kernels": [3, 5, 7],
     }
 
     cfg_path = BASE_DIR / "configs" / "stgcn.yaml"
@@ -394,9 +509,13 @@ def main():
 
     device = torch.device(cfg["device"])
 
+    # honor env override
+    cfg["model"] = os.getenv("MODEL", cfg.get("model", "stgcn"))
+    print(f"Using model: {cfg['model']}")
+
     # --- Logging dirs ---
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(cfg["run_root"]) / run_id
+    log_dir = Path(cfg["run_root"]) / f"{cfg['model']}_experiment" / run_id
     ckpt_dir = Path(cfg["ckpt_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -430,27 +549,21 @@ def main():
     # --- Model ---
     V = 17  # number of nodes
     # correlation
-    corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
-    A = make_partitioned_adj_from_specs(V, corr_pkl)
-    names = ["A_self (identity)", "A_freq (within-group)", "A_corr (binary, sym)"]
-    print(f"A shape: {tuple(A.shape)}  (K, V, V)")
-    print_adj_binary(A, names, sep="")   # <- compact 0/1 rows
-    # (optional) quick stats too
-    for k, name in enumerate(names):
-        deg = A[k].sum(dim=1)
-        print(f"{name}: nnz={int(A[k].count_nonzero())}, degree range=({deg.min().item():.0f},{deg.max().item():.0f})")
+    A = None
+    if _model_needs_graph(cfg["model"]):
+        corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
+        A = make_partitioned_adj_from_specs(V, corr_pkl)
+        names = ["A_self (identity)", "A_freq (within-group)", "A_corr (binary, sym)"]
+        print(f"A shape: {tuple(A.shape)}  (K, V, V)")
+        print_adj_binary(A, names, sep="")   # <- compact 0/1 rows
+        # (optional) quick stats too
+        for k, name in enumerate(names):
+            deg = A[k].sum(dim=1)
+            print(f"{name}: nnz={int(A[k].count_nonzero())}, degree range=({deg.min().item():.0f},{deg.max().item():.0f})")
 
     status_classes: List[int] = cfg["status_classes"]
 
-    model = STGCN(
-        A=A,
-        status_classes=status_classes,
-        in_channels=cfg["in_channels"],
-        channels=tuple(cfg["channels"]),
-        temporal_kernel=tuple(cfg["temporal_kernel"]),
-        dropout=cfg["dropout"],
-        edge_importance=cfg["edge_importance"],
-    ).to(device)
+    model = build_model(cfg, device=device, A=A)
 
     # --- Optimizer & (optional) scheduler ---
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -505,7 +618,7 @@ def main():
         # --- Checkpoint ---
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_path = ckpt_dir / f"stgcn_best.pt"
+            best_path = ckpt_dir / f"{cfg['model']}_best.pt"
             torch.save(
                 {
                     "epoch": epoch,
