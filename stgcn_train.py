@@ -11,25 +11,15 @@ Inputs (from stgcn_data_loader.py pickles):
 
 This mirrors a typical train.py structure but targets the ST-GCN model:
 - YAML config support (optional). Defaults kick in if the YAML is missing.
-- TensorBoard logging under runs/stgcn_experiment/<timestamp>
+- TensorBoard logging:
+    * default (3 base partitions): runs/<model>_experiment/<timestamp>
+    * with causality (3+14 partitions): runs/<model>_with_causality_experiment/<timestamp>
 - Weighted multi-task loss: MSE for RUL + CrossEntropy for 4 status heads
 - Checkpointing best model by validation loss
 
-Folder layout:
-HSTI/
-├─ stgcn_train.py
-├─ configs/
-│  └─ stgcn.yaml
-├─ datasets/
-│  └─ stgcn_data_loader.py
-└─ models/
-   ├─ stgcn.py
-   ├─ stgcn_no_attention.py        
-   ├─ tcn.py                     
-   ├─ dcrnn.py                       
-   └─ inception_time.py              
-
-
+To enable the 14 causality layers in A at runtime:
+    python3 stgcn_train.py --add-causality
+(Without the flag, only the 3 base layers are used.)
 """
 
 import os
@@ -37,6 +27,7 @@ import math
 import time
 import yaml
 import pickle
+import argparse
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
@@ -128,13 +119,17 @@ def macro_precision_from_logits(logits: torch.Tensor, targets: torch.Tensor, num
 def make_partitioned_adj_from_specs(
     V: int,
     corr_pkl_path: Path,
+    add_causality: bool
 ) -> torch.Tensor:
     """
-    K=3 adjacency:
+    K adjacency (K=3 or 3+14):
       A[0] = I_V  (self)
       A[1] = frequency-group edges (same group, no self)
       A[2] = correlation edges (loaded from pickle, symmetrized, no self)
-
+      If add_causality:
+        A[3:3+14] = 14 causality layers, one per high-level feature (17x17 each).
+                    Each layer is binary with threshold: |val| > 0.5 -> 1, else 0.
+                    Diagonal is set to 0. Ordering assumes sensor-major: index = sensor*14 + feat.
     Node order MUST match the dataset:
       [PS1..PS6, EPS1] (7) + [FS1, FS2] (2) + [TS1..TS4, VS1, SE, CE, CP] (8)  => V=17
     """
@@ -177,8 +172,30 @@ def make_partitioned_adj_from_specs(
     A_corr = 0.5 * (A_corr + A_corr.t())
     A_corr.fill_diagonal_(0.0)
 
-    # --- stack K=3 ---
-    A = torch.stack([A_self, A_freq, A_corr], dim=0)  # (3, V, V)
+    # --- stack base 3 ---
+    A_list = [A_self, A_freq, A_corr]
+
+    # --- optionally add 14 causality layers (one per high-level feature) ---
+    if add_causality:
+        # path: HSTI/data/causality/pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl
+        with open(BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl", "rb") as f:
+            C = _pkl.load(f)  # expected (238, 238) = (17*14, 17*14)
+        if isinstance(C, torch.Tensor):
+            C = C.float()
+        else:
+            C = torch.tensor(C, dtype=torch.float32)
+        if C.shape != (V * 14, V * 14):
+            raise ValueError(f"Causality matrix must be (238,238); got {tuple(C.shape)}")
+        # Assume sensor-major ordering: index = sensor*14 + feat
+        for feat in range(14):
+            idx = torch.tensor([s * 14 + feat for s in range(V)], dtype=torch.long)
+            sub = C.index_select(0, idx).index_select(1, idx)  # (V,V)
+            # threshold to binary, keep direction, drop diagonal
+            A_feat = ((sub > 0.5) | (sub < -0.5)).to(torch.float32)
+            A_feat.fill_diagonal_(0.0)
+            A_list.append(A_feat)
+
+    A = torch.stack(A_list, dim=0)  # (K, V, V) where K=3 or 17
     return A
 
 
@@ -452,6 +469,13 @@ def _check_finite(tag: str, t: torch.Tensor):
 # Main
 # -----------------------
 def main():
+    # CLI flag: --add-causality (default False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--add-causality", action="store_true",
+                        help="Append 14 causality layers to adjacency A; "
+                             "logs under <model>_with_causality_experiment/.")
+    args, _ = parser.parse_known_args()
+
     # Defaults (overridden by configs/stgcn.yaml if present)
     default_cfg = {
         "seed": 42,
@@ -478,44 +502,45 @@ def main():
         "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
         "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
         "run_root":  str(BASE_DIR / "runs"),
-        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "stgcn"),
+        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "causality_bone_add"),
         # added
         "model": "stgcn",
         "T": 6,
-        # optional alt-model params
-        # TCN
+        # alt-model params
         "tcn_channels": [64, 32, 10],
         "tcn_dilations": [1, 2, 4],
         "tcn_kernel": 3,
         "tcn_dropout": 0.1,
         "tcn_causal": False,
-        # DCRNN
         "dcrnn_hidden": 64,
         "dcrnn_layers": 2,
         "dcrnn_k": 1,
-        # InceptionTime
         "it_filters": 32,
         "it_depth": 6,
         "it_bottleneck": 32,
         "it_kernels": [3, 5, 7],
+        # causality toggle (default false; overridden by CLI)
+        "add_causality": False,
     }
 
     cfg_path = BASE_DIR / "configs" / "stgcn.yaml"
     cfg = load_yaml_config(default_cfg, cfg_path)
+    # CLI override
+    cfg["add_causality"] = bool(args.add_causality)
 
     seed_everything(cfg["seed"])
-
-    torch.autograd.set_detect_anomaly(True)  # pinpoints the first bad op
-
+    torch.autograd.set_detect_anomaly(True)
     device = torch.device(cfg["device"])
 
-    # honor env override
+    # honor env override for model
     cfg["model"] = os.getenv("MODEL", cfg.get("model", "stgcn"))
-    print(f"Using model: {cfg['model']}")
+    print(f"Using model: {cfg['model']}; add_causality={cfg['add_causality']}")
 
     # --- Logging dirs ---
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(cfg["run_root"]) / f"{cfg['model']}_experiment" / run_id
+    exp_name = (f"{cfg['model']}_with_causality_experiment"
+                if cfg["add_causality"] else f"{cfg['model']}_experiment")
+    log_dir = Path(cfg["run_root"]) / exp_name / run_id
     ckpt_dir = Path(cfg["ckpt_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -528,8 +553,6 @@ def main():
         train_dataset = pickle.load(f)
     with open(cfg["val_pkl"], "rb") as f:
         val_dataset = pickle.load(f)
-
-
 
     train_loader = DataLoader(
         train_dataset,
@@ -548,21 +571,18 @@ def main():
 
     # --- Model ---
     V = 17  # number of nodes
-    # correlation
     A = None
     if _model_needs_graph(cfg["model"]):
         corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
-        A = make_partitioned_adj_from_specs(V, corr_pkl)
+        A = make_partitioned_adj_from_specs(V, corr_pkl, cfg["add_causality"])
         names = ["A_self (identity)", "A_freq (within-group)", "A_corr (binary, sym)"]
         print(f"A shape: {tuple(A.shape)}  (K, V, V)")
-        print_adj_binary(A, names, sep="")   # <- compact 0/1 rows
-        # (optional) quick stats too
+        print_adj_binary(A, names, sep="")
         for k, name in enumerate(names):
             deg = A[k].sum(dim=1)
             print(f"{name}: nnz={int(A[k].count_nonzero())}, degree range=({deg.min().item():.0f},{deg.max().item():.0f})")
 
     status_classes: List[int] = cfg["status_classes"]
-
     model = build_model(cfg, device=device, A=A)
 
     # --- Optimizer & (optional) scheduler ---
@@ -607,7 +627,6 @@ def main():
         writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
         writer.add_scalar("status_ce/val_sum", sum(val_ce), epoch)
         writer.add_scalar("status_ce/train_sum", sum(train_ce), epoch)
-
 
         dt = time.time() - t0
         prec_str = " ".join([f"S{i}_P:{val_precs[i]*100:.1f}%" for i in range(len(status_classes))])

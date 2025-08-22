@@ -1,9 +1,8 @@
-
 # test.py
 # -*- coding: utf-8 -*-
 """
 Evaluate best checkpoints of all backbones on the TEST set and print comparisons.
-- Loads checkpoints: checkpoints/stgcn/<model>_best.pt
+- Loads checkpoints from one or more roots (e.g., checkpoints/stgcn and checkpoints/with_causalities)
 - Uses pickles from configs YAML (expects test_stgcn.pkl)
 - Metrics over the entire test set:
     total loss (MSE + sum CE), RUL MSE/RMSE,
@@ -14,6 +13,7 @@ Evaluate best checkpoints of all backbones on the TEST set and print comparisons
 Usage:
   python3 test.py --config configs/stgcn.yaml
   python3 test.py --models stgcn,tcn,dcrnn,stgcn_no_attention,inception_time --device cuda
+  python3 test.py --ckpt-roots checkpoints/stgcn,checkpoints/with_causalities
 """
 
 import os
@@ -93,11 +93,38 @@ def make_partitioned_adj_from_specs(V: int, corr_pkl_path: Path) -> torch.Tensor
 
     return torch.stack([A_self, A_freq, A_corr], dim=0)
 
+def add_causality_layers(A_base: torch.Tensor, V: int) -> torch.Tensor:
+    """
+    Append 14 causality layers (one per HL feature) to base A.
+    PCMCI file: data/causality/pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl
+    Threshold: |val| > 0.5 -> 1 else 0; diagonal zero.
+    Assumes sensor-major ordering in the 238x238 matrix: idx = sensor*14 + feat.
+    """
+    caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
+    if not caus_path.exists():
+        print(f"[WARN] causality file not found at {caus_path}, skipping causality layers")
+        return A_base
+    with open(caus_path, "rb") as f:
+        C = pickle.load(f)
+    C = torch.as_tensor(C, dtype=torch.float32)
+    if C.shape != (V*14, V*14):
+        raise ValueError(f"Causality matrix must be {(V*14, V*14)}; got {tuple(C.shape)}")
+
+    layers = []
+    for feat in range(14):
+        idx = torch.tensor([s*14 + feat for s in range(V)], dtype=torch.long)
+        sub = C.index_select(0, idx).index_select(1, idx)  # (V,V)
+        A_feat = ((sub > 0.5) | (sub < -0.5)).to(torch.float32)
+        A_feat.fill_diagonal_(0.0)
+        layers.append(A_feat)
+    A_causal = torch.stack(layers, dim=0)  # (14,V,V)
+    return torch.cat([A_base, A_causal], dim=0)  # (3+14,V,V)
+
 def model_needs_graph(name: str) -> bool:
     n = name.lower()
     return n in ("stgcn", "stgcn_no_attention", "dcrnn")
 
-# ---------- Model factory (matches your train factory) ----------
+# ---------- Model factory  ----------
 def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = None) -> nn.Module:
     name = name.lower()
     status_classes = cfg["status_classes"]; in_channels = cfg["in_channels"]
@@ -146,8 +173,6 @@ def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.T
 def count_params_and_size_mb(m: nn.Module) -> Tuple[int, int, float]:
     total = sum(p.numel() for p in m.parameters())
     trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
-    # bytes = sum(p.numel()*p.element_size() for p in m.parameters())
-    # Use element_size to be dtype-aware:
     bytes_total = 0
     for p in m.parameters():
         bytes_total += p.numel() * p.element_size()
@@ -191,13 +216,8 @@ def evaluate_model(model: nn.Module,
     sum_total_loss = 0.0
     sum_mse = 0.0
 
-    # per-head CE weighted by samples
     sum_ce = [0.0]*len(status_classes)
-
-    # per-head micro accuracy counts
     correct = [0]*len(status_classes)
-
-    # per-head macro precision components (TP/FP per class)
     tp = [torch.zeros(n, dtype=torch.long) for n in status_classes]
     fp = [torch.zeros(n, dtype=torch.long) for n in status_classes]
 
@@ -268,6 +288,9 @@ def main():
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--bench-warmup", type=int, default=5)
     ap.add_argument("--bench-iters", type=int, default=20)
+    ap.add_argument("--ckpt-roots", type=str,
+                    default="checkpoints/stgcn,checkpoints/with_causalities",
+                    help="comma-separated checkpoint roots to scan")
     args = ap.parse_args()
 
     default_cfg = {
@@ -309,69 +332,75 @@ def main():
     except StopIteration:
         x_bench = None
 
-    # Build adjacency if any requested model needs it
+    # Compare across multiple checkpoint roots
+    ckpt_roots = [BASE_DIR / p.strip() for p in args.ckpt_roots.split(",")]
     names = [m.strip() for m in args.models.split(",")]
-    need_graph = any(model_needs_graph(n) for n in names)
-    A = None
-    if need_graph:
-        corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
-        if corr_pkl.exists():
-            A = make_partitioned_adj_from_specs(17, corr_pkl).to(device)
-        else:
-            print("[WARN] correlation not found; using identity-only adjacency")
-            A = torch.stack([torch.eye(17, device=device)]*3, dim=0)
 
-    # Evaluate each model with its best checkpoint
     results = []
-    for name in names:
-        print("\n" + "="*90)
-        print(f"[MODEL] {name} — loading best checkpoint and evaluating on TEST")
-        print("="*90)
+    for root in ckpt_roots:
+        # Build adjacency for this root if any requested model needs it
+        need_graph = any(model_needs_graph(n) for n in names)
+        A_for_root = None
+        if need_graph:
+            corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
+            if corr_pkl.exists():
+                A_for_root = make_partitioned_adj_from_specs(17, corr_pkl)
+            else:
+                print("[WARN] correlation not found; using identity-only adjacency")
+                A_for_root = torch.stack([torch.eye(17)]*3, dim=0)
+            # add causality layers only for with_causalities
+            if root.name == "with_causalities":
+                A_for_root = add_causality_layers(A_for_root, V=17)
+            A_for_root = A_for_root.to(device)
 
-        model = build_model(name, cfg, device, A=A if model_needs_graph(name) else None)
+        for name in names:
+            print("\n" + "="*90)
+            print(f"[MODEL] {name}@{root.name} — loading best checkpoint and evaluating on TEST")
+            print("="*90)
 
-        ckpt_path = BASE_DIR / "checkpoints" / "stgcn" / f"{name}_best.pt"
-        if not ckpt_path.exists():
-            print(f"[LOAD] No checkpoint found at {ckpt_path}. Skipping.")
-            continue
-        try:
-            state = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(state["model_state"], strict=False)
-            print(f"[LOAD] Loaded {ckpt_path}")
-        except Exception as e:
-            print(f"[LOAD] Failed to load {ckpt_path}: {e}")
-            continue
+            model = build_model(name, cfg, device, A=A_for_root if model_needs_graph(name) else None)
 
-        # Params and size
-        total_params, trainable_params, size_mb = count_params_and_size_mb(model)
-        print(f"Params: total={total_params:,}  trainable={trainable_params:,}  (~{size_mb:.2f} MB)")
+            ckpt_path = root / f"{name}_best.pt"
+            if not ckpt_path.exists():
+                print(f"[LOAD] No checkpoint found at {ckpt_path}. Skipping.")
+                continue
+            try:
+                state = torch.load(ckpt_path, map_location=device)
+                model.load_state_dict(state["model_state"], strict=False)
+                print(f"[LOAD] Loaded {ckpt_path}")
+            except Exception as e:
+                print(f"[LOAD] Failed to load {ckpt_path}: {e}")
+                continue
 
-        # Speed benchmark (single batch)
-        if x_bench is not None:
-            fwd_ms, fwd_thr = benchmark_forward(model, x_bench, device,
-                                                warmup=args.bench_warmup, iters=args.bench_iters)
-            print(f"Forward speed: {fwd_ms:.3f} ms/batch  |  throughput: {fwd_thr:.1f} samples/s")
-        else:
-            fwd_ms, fwd_thr = float('nan'), float('nan')
-            print("Forward speed: N/A (empty test loader)")
+            # Params & size
+            total_params, trainable_params, size_mb = count_params_and_size_mb(model)
+            print(f"Params: total={total_params:,}  trainable={trainable_params:,}  (~{size_mb:.2f} MB)")
 
-        # Complete TEST evaluation
-        metrics = evaluate_model(model, test_loader, device, cfg["status_classes"])
+            # Speed (single batch)
+            if x_bench is not None:
+                fwd_ms, fwd_thr = benchmark_forward(model, x_bench, device,
+                                                    warmup=args.bench_warmup, iters=args.bench_iters)
+                print(f"Forward speed: {fwd_ms:.3f} ms/batch  |  throughput: {fwd_thr:.1f} samples/s")
+            else:
+                fwd_ms, fwd_thr = float('nan'), float('nan')
+                print("Forward speed: N/A (empty test loader)")
 
-        # Print per-model metrics
-        print(f"Total loss (test): {metrics['avg_total_loss']:.4f}")
-        print(f"RUL MSE / RMSE   : {metrics['rul_mse']:.6f} / {metrics['rul_rmse']:.6f}")
-        for j, (acc, mp) in enumerate(zip(metrics["status_micro_acc"], metrics["status_macro_prec"])):
-            print(f"status{j}: micro_acc={acc*100:.2f}%  macro_prec={mp*100:.2f}%  CE={metrics['status_ce'][j]:.4f}")
+            # TEST metrics
+            metrics = evaluate_model(model, test_loader, device, cfg["status_classes"])
+            print(f"Total loss (test): {metrics['avg_total_loss']:.4f}")
+            print(f"RUL MSE / RMSE   : {metrics['rul_mse']:.6f} / {metrics['rul_rmse']:.6f}")
+            for j, (acc, mp) in enumerate(zip(metrics["status_micro_acc"], metrics["status_macro_prec"])):
+                print(f"status{j}: micro_acc={acc*100:.2f}%  macro_prec={mp*100:.2f}%  CE={metrics['status_ce'][j]:.4f}")
 
-        results.append({
-            "name": name,
-            "params": total_params,
-            "size_mb": size_mb,
-            "fwd_ms": fwd_ms,
-            "fwd_thr": fwd_thr,
-            **metrics
-        })
+            results.append({
+                "name": f"{name}@{root.name}",
+                "root": root.name,
+                "params": total_params,
+                "size_mb": size_mb,
+                "fwd_ms": fwd_ms,
+                "fwd_thr": fwd_thr,
+                **metrics
+            })
 
     # Ranked summary
     print("\n" + "="*90)
