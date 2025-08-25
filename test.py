@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Evaluate best checkpoints of all backbones on the TEST set and print comparisons.
-- Loads checkpoints from one or more roots (e.g., checkpoints/stgcn and checkpoints/with_causalities)
+- Loads checkpoints from one or more roots (e.g., checkpoints/stgcn, checkpoints/with_causalities, checkpoints/with_1_causality)
 - Uses pickles from configs YAML (expects test_stgcn.pkl)
 - Metrics over the entire test set:
     total loss (MSE + sum CE), RUL MSE/RMSE,
@@ -12,8 +12,8 @@ Evaluate best checkpoints of all backbones on the TEST set and print comparisons
 
 Usage:
   python3 test.py --config configs/stgcn.yaml
-  python3 test.py --models stgcn,tcn,dcrnn,stgcn_no_attention,inception_time --device cuda
-  python3 test.py --ckpt-roots checkpoints/stgcn,checkpoints/with_causalities
+  python3 test.py --models stgcn,stgcn_no_attention,stgcn_residual_attention,tcn,dcrnn,inception_time --device cuda
+  python3 test.py --ckpt-roots checkpoints/stgcn,checkpoints/with_causalities,checkpoints/with_1_causality
 """
 
 import os
@@ -27,6 +27,7 @@ from typing import Dict, Any, List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401 (kept for clarity / parity)
 
@@ -120,9 +121,33 @@ def add_causality_layers(A_base: torch.Tensor, V: int) -> torch.Tensor:
     A_causal = torch.stack(layers, dim=0)  # (14,V,V)
     return torch.cat([A_base, A_causal], dim=0)  # (3+14,V,V)
 
+def add_one_causality_layer(A_base: torch.Tensor, V: int) -> torch.Tensor:
+    """
+    Append ONE pooled causality layer to base A.
+    Steps: abs(238x238) -> avg_pool2d(kernel=14,stride=14) -> (17x17) -> >0.5 -> 1 else 0 -> diag=0
+    Assumes sensor-major feature ordering: idx = sensor*14 + feat.
+    """
+    caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
+    if not caus_path.exists():
+        print(f"[WARN] causality file not found at {caus_path}, skipping one-layer causality")
+        return A_base
+    with open(caus_path, "rb") as f:
+        C = pickle.load(f)
+    C = torch.as_tensor(C, dtype=torch.float32)
+    if C.shape != (V*14, V*14):
+        raise ValueError(f"Causality matrix must be {(V*14, V*14)}; got {tuple(C.shape)}")
+
+    C_abs = C.abs().unsqueeze(0).unsqueeze(0)  # (1,1,238,238)
+    A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14))  # (1,1,17,17)
+    A_caus = A_caus.squeeze(0).squeeze(0)  # (17,17)
+    A_caus = (A_caus > 0.5).to(torch.float32)
+    A_caus.fill_diagonal_(0.0)
+
+    return torch.cat([A_base, A_caus.unsqueeze(0)], dim=0)  # (3+1,V,V)
+
 def model_needs_graph(name: str) -> bool:
     n = name.lower()
-    return n in ("stgcn", "stgcn_no_attention", "dcrnn")
+    return n in ("stgcn", "stgcn_no_attention", "stgcn_residual_attention", "dcrnn")
 
 # ---------- Model factory  ----------
 def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = None) -> nn.Module:
@@ -140,6 +165,11 @@ def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.T
         model = STGCN_NoAttention(A=A, status_classes=status_classes, in_channels=in_channels,
                                   channels=tuple(cfg["channels"]), temporal_kernel=tuple(cfg["temporal_kernel"]),
                                   dropout=cfg["dropout"], edge_importance=cfg["edge_importance"])
+    elif name == "stgcn_residual_attention":
+        from models.stgcn_residual_attention import STGCN_residual_attention
+        model = STGCN_residual_attention(A=A, status_classes=status_classes, in_channels=in_channels,
+                                         channels=tuple(cfg["channels"]), temporal_kernel=tuple(cfg["temporal_kernel"]),
+                                         dropout=cfg["dropout"], edge_importance=cfg["edge_importance"])
     elif name == "tcn":
         from models.tcn import TCNBackbone
         model = TCNBackbone(status_classes=status_classes, in_channels=in_channels, V=V,
@@ -283,13 +313,14 @@ def evaluate_model(model: nn.Module,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default=str(BASE_DIR / "configs" / "stgcn.yaml"))
-    ap.add_argument("--models", type=str, default="stgcn,stgcn_no_attention,tcn,dcrnn,inception_time")
+    ap.add_argument("--models", type=str,
+                    default="stgcn,stgcn_no_attention,stgcn_residual_attention,tcn,dcrnn,inception_time")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--bench-warmup", type=int, default=5)
     ap.add_argument("--bench-iters", type=int, default=20)
     ap.add_argument("--ckpt-roots", type=str,
-                    default="checkpoints/stgcn,checkpoints/with_causalities",
+                    default="checkpoints/stgcn,checkpoints/with_causalities,checkpoints/with_1_causality",
                     help="comma-separated checkpoint roots to scan")
     args = ap.parse_args()
 
@@ -348,9 +379,15 @@ def main():
             else:
                 print("[WARN] correlation not found; using identity-only adjacency")
                 A_for_root = torch.stack([torch.eye(17)]*3, dim=0)
-            # add causality layers only for with_causalities
+
+            # Choose causality variant by checkpoint root name
             if root.name == "with_causalities":
+                # old variant: append 14 layers (K=17 total)
                 A_for_root = add_causality_layers(A_for_root, V=17)
+            elif root.name == "with_1_causality":
+                # new variant: append ONE pooled layer (K=4 total)
+                A_for_root = add_one_causality_layer(A_for_root, V=17)
+
             A_for_root = A_for_root.to(device)
 
         for name in names:

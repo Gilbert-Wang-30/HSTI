@@ -13,11 +13,11 @@ This mirrors a typical train.py structure but targets the ST-GCN model:
 - YAML config support (optional). Defaults kick in if the YAML is missing.
 - TensorBoard logging:
     * default (3 base partitions): runs/<model>_experiment/<timestamp>
-    * with causality (3+14 partitions): runs/<model>_with_causality_experiment/<timestamp>
+    * with causality (3+1 partitions): runs/<model>_with_causality_experiment/<timestamp>
 - Weighted multi-task loss: MSE for RUL + CrossEntropy for 4 status heads
 - Checkpointing best model by validation loss
 
-To enable the 14 causality layers in A at runtime:
+To enable the 1 causality layers in A at runtime:
     python3 stgcn_train.py --add-causality
 (Without the flag, only the 3 base layers are used.)
 """
@@ -122,14 +122,14 @@ def make_partitioned_adj_from_specs(
     add_causality: bool
 ) -> torch.Tensor:
     """
-    K adjacency (K=3 or 3+14):
+    K adjacency (K=3 or 4):
       A[0] = I_V  (self)
       A[1] = frequency-group edges (same group, no self)
       A[2] = correlation edges (loaded from pickle, symmetrized, no self)
       If add_causality:
-        A[3:3+14] = 14 causality layers, one per high-level feature (17x17 each).
-                    Each layer is binary with threshold: |val| > 0.5 -> 1, else 0.
-                    Diagonal is set to 0. Ordering assumes sensor-major: index = sensor*14 + feat.
+        A[3] = ONE causality layer (17x17), built from the 238x238 PCMCI matrix by:
+               abs -> avg-pool (14x14, stride 14) -> threshold (>0.5 -> 1) -> diag=0.
+               (Assumes sensor-major ordering: feature index = sensor*14 + feat_id.)
     Node order MUST match the dataset:
       [PS1..PS6, EPS1] (7) + [FS1, FS2] (2) + [TS1..TS4, VS1, SE, CE, CP] (8)  => V=17
     """
@@ -151,60 +151,51 @@ def make_partitioned_adj_from_specs(
     A_freq = torch.zeros(V, V, dtype=torch.float32)
     for group in [idx_100, idx_10, idx_1]:
         g = torch.tensor(group, dtype=torch.long)
-        # fill a block of ones, then zero its diagonal
         A_freq[g[:, None], g[None, :]] = 1.0
         A_freq[g, g] = 0.0
-    # (already symmetric)
 
     # --- A2: correlation adjacency (binary), force symmetric, drop self loops ---
     import pickle as _pkl
     with open(corr_pkl_path, "rb") as f:
         co = _pkl.load(f)  # expected shape (V, V), dtype numeric (0/1)
-    if isinstance(co, torch.Tensor):
-        A_corr = co.float()
-    else:
-        A_corr = torch.tensor(co, dtype=torch.float32)
-
+    A_corr = co if isinstance(co, torch.Tensor) else torch.tensor(co, dtype=torch.float32)
     if A_corr.shape != (V, V):
         raise ValueError(f"Correlation matrix shape {A_corr.shape} != ({V}, {V})")
-
-    # symmetrize (if needed) and remove diagonal
     A_corr = 0.5 * (A_corr + A_corr.t())
     A_corr.fill_diagonal_(0.0)
 
-    # --- stack base 3 ---
     A_list = [A_self, A_freq, A_corr]
 
-    # --- optionally add 14 causality layers (one per high-level feature) ---
+    # --- optionally add ONE 17x17 causality layer ---
     if add_causality:
-        # path: HSTI/data/causality/pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl
-        with open(BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl", "rb") as f:
+        caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
+        with open(caus_path, "rb") as f:
             C = _pkl.load(f)  # expected (238, 238) = (17*14, 17*14)
-        if isinstance(C, torch.Tensor):
-            C = C.float()
-        else:
-            C = torch.tensor(C, dtype=torch.float32)
-        if C.shape != (V * 14, V * 14):
-            raise ValueError(f"Causality matrix must be (238,238); got {tuple(C.shape)}")
-        # Assume sensor-major ordering: index = sensor*14 + feat
-        for feat in range(14):
-            idx = torch.tensor([s * 14 + feat for s in range(V)], dtype=torch.long)
-            sub = C.index_select(0, idx).index_select(1, idx)  # (V,V)
-            # threshold to binary, keep direction, drop diagonal
-            A_feat = ((sub > 0.5) | (sub < -0.5)).to(torch.float32)
-            A_feat.fill_diagonal_(0.0)
-            A_list.append(A_feat)
+        C = C if isinstance(C, torch.Tensor) else torch.tensor(C, dtype=torch.float32)
+        if C.shape != (V*14, V*14):
+            raise ValueError(f"Causality matrix must be ({V*14},{V*14}); got {tuple(C.shape)}")
 
-    A = torch.stack(A_list, dim=0)  # (K, V, V) where K=3 or 17
+        # abs, then average pooling (kernel=14, stride=14) to collapse features->sensors
+        # reshape to NCHW for pooling: (1,1,238,238)
+        C_abs = C.abs().unsqueeze(0).unsqueeze(0)  # (1,1,238,238)
+        A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14))  # (1,1,17,17)
+        A_caus = A_caus.squeeze(0).squeeze(0)  # (17,17)
+
+        # threshold > 0.5 -> 1 else 0; drop self-loops
+        A_caus = (A_caus > 0.5).to(torch.float32)
+        A_caus.fill_diagonal_(0.0)
+
+        A_list.append(A_caus)
+
+    A = torch.stack(A_list, dim=0)  # K=3 (no causality) or K=4 (with causality)
     return A
-
 
 # -----------------------
 # Model factory (added)
 # -----------------------
 def _model_needs_graph(name: str) -> bool:
     name = name.lower()
-    return name in ("stgcn", "stgcn_no_attention", "dcrnn")
+    return name in ("stgcn", "stgcn_no_attention", "stgcn_residual_attention","dcrnn")
 
 def build_model(cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = None) -> nn.Module:
     """
@@ -220,6 +211,18 @@ def build_model(cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = Non
     if name == "stgcn":
         from models.stgcn import STGCN
         model = STGCN(
+            A=A,
+            status_classes=status_classes,
+            in_channels=in_channels,
+            channels=tuple(cfg["channels"]),
+            temporal_kernel=tuple(cfg["temporal_kernel"]),
+            dropout=cfg["dropout"],
+            edge_importance=cfg["edge_importance"],
+        )
+
+    elif name == "stgcn_residual_attention":
+        from models.stgcn_residual_attention import STGCN_residual_attention
+        model = STGCN_residual_attention(
             A=A,
             status_classes=status_classes,
             in_channels=in_channels,
@@ -291,7 +294,7 @@ def build_model(cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = Non
 
     else:
         raise ValueError(f"Unknown model '{name}'. Expected one of "
-                         "stgcn | stgcn_no_attention | tcn | dcrnn | inception_time")
+                         "stgcn | stgcn_no_attention | stgcn_residual_attention | tcn | dcrnn | inception_time")
 
     return model.to(device)
 
@@ -472,7 +475,7 @@ def main():
     # CLI flag: --add-causality (default False)
     parser = argparse.ArgumentParser()
     parser.add_argument("--add-causality", action="store_true",
-                        help="Append 14 causality layers to adjacency A; "
+                        help="Append 1 causality layers to adjacency A; "
                              "logs under <model>_with_causality_experiment/.")
     args, _ = parser.parse_known_args()
 
@@ -502,7 +505,7 @@ def main():
         "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
         "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
         "run_root":  str(BASE_DIR / "runs"),
-        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "causality_bone_add"),
+        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "with_1_causality"),
         # added
         "model": "stgcn",
         "T": 6,
