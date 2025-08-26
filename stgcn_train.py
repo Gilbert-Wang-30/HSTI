@@ -4,22 +4,20 @@
 """
 Training script for ST-GCN on HSTI sensors.
 
-Inputs (from stgcn_data_loader.py pickles):
-  x: (C, T, V) with C=24 (10 raw + 14 hl), T=6, V=17
-  rul: scalar in [0, 1] (recommended; if not, consider scaling)
-  status: (4,) integer labels for 4 classification heads
+Changes in this version:
+- COMPLETELY REMOVES the frequency partition (A_freq). Base adjacency is K=2:
+    [0] A_self (identity)
+    [1] A_corr (binary correlation, symmetrized, no self)
+- Optional ONE pooled causality layer (K=3) when --add-causality is set:
+    [2] A_caus (pooled from 238x238 PCMCI matrix; thresholded by --causality-thresh)
+- You can pass a threshold (0.0..1.0) with --causality-thresh (default 0.5).
 
-This mirrors a typical train.py structure but targets the ST-GCN model:
-- YAML config support (optional). Defaults kick in if the YAML is missing.
-- TensorBoard logging:
-    * default (3 base partitions): runs/<model>_experiment/<timestamp>
-    * with causality (3+1 partitions): runs/<model>_with_causality_experiment/<timestamp>
-- Weighted multi-task loss: MSE for RUL + CrossEntropy for 4 status heads
-- Checkpointing best model by validation loss
+Logging:
+  * default (K=2):   runs/<model>_experiment/<timestamp>
+  * with causality:  runs/<model>_with_causality_experiment/<timestamp>
 
-To enable the 1 causality layers in A at runtime:
-    python3 stgcn_train.py --add-causality
-(Without the flag, only the 3 base layers are used.)
+Checkpoints:
+  cfg["ckpt_dir"]/<model>_best.pt
 """
 
 import os
@@ -38,7 +36,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from datasets.stgcn_data_loader import STGCNDataset  
+from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401 (kept for parity)
 
 
 # -----------------------
@@ -67,23 +65,6 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
-
-def make_partitioned_ring_adjacency(V: int) -> torch.Tensor:
-    """
-    Build a simple K=3 partitioned adjacency:
-      - A_self      : identity
-      - A_forward   : ring edges v -> (v+1) % V
-      - A_backward  : transpose of forward
-    Shape: (K=3, V, V)
-    Replace with your true partitions if you have them.
-    """
-    A_self = torch.eye(V)
-    A_fwd = torch.zeros(V, V)
-    for v in range(V):
-        A_fwd[v, (v + 1) % V] = 1.0
-    A_bwd = A_fwd.t()
-    A = torch.stack([A_self, A_fwd, A_bwd], dim=0)  # (3, V, V)
-    return A
 
 def print_adj_binary(A: torch.Tensor, names=None, sep=""):
     """
@@ -116,82 +97,58 @@ def macro_precision_from_logits(logits: torch.Tensor, targets: torch.Tensor, num
             precs.append(prec)
         return float(sum(precs) / len(precs))
 
-def make_partitioned_adj_from_specs(
-    V: int,
-    corr_pkl_path: Path,
-    add_causality: bool
-) -> torch.Tensor:
-    """
-    K adjacency (K=3 or 4):
-      A[0] = I_V  (self)
-      A[1] = frequency-group edges (same group, no self)
-      A[2] = correlation edges (loaded from pickle, symmetrized, no self)
-      If add_causality:
-        A[3] = ONE causality layer (17x17), built from the 238x238 PCMCI matrix by:
-               abs -> avg-pool (14x14, stride 14) -> threshold (>0.5 -> 1) -> diag=0.
-               (Assumes sensor-major ordering: feature index = sensor*14 + feat_id.)
-    Node order MUST match the dataset:
-      [PS1..PS6, EPS1] (7) + [FS1, FS2] (2) + [TS1..TS4, VS1, SE, CE, CP] (8)  => V=17
-    """
-    # --- group definitions (must match STGCNDataset ordering) ---
-    sensors_100hz = ["PS1", "PS2", "PS3", "PS4", "PS5", "PS6", "EPS1"]  # 7
-    sensors_10hz  = ["FS1", "FS2"]                                      # 2
-    sensors_1hz   = ["TS1", "TS2", "TS3", "TS4", "VS1", "SE", "CE", "CP"]  # 8
-    assert V == (len(sensors_100hz) + len(sensors_10hz) + len(sensors_1hz)), "V must be 17."
 
-    # Index ranges in the concatenated node order used by the dataset
-    idx_100 = list(range(0, len(sensors_100hz)))  # 0..6
-    idx_10  = list(range(idx_100[-1] + 1, idx_100[-1] + 1 + len(sensors_10hz)))  # 7..8
-    idx_1   = list(range(idx_10[-1] + 1, idx_10[-1] + 1 + len(sensors_1hz)))     # 9..16
-
-    # --- A0: identity (self connections) ---
+# -----------------------
+# Adjacency builders (NO FREQUENCY PARTITION)
+# -----------------------
+def make_partitioned_base2(V: int, corr_pkl_path: Path) -> torch.Tensor:
+    """
+    Return K=2 base partitions:
+      [0] A_self (identity)
+      [1] A_corr (binary correlation, sym, no self)
+    """
     A_self = torch.eye(V, dtype=torch.float32)
 
-    # --- A1: frequency-group adjacency (fully connected within each group, no self) ---
-    A_freq = torch.zeros(V, V, dtype=torch.float32)
-    for group in [idx_100, idx_10, idx_1]:
-        g = torch.tensor(group, dtype=torch.long)
-        A_freq[g[:, None], g[None, :]] = 1.0
-        A_freq[g, g] = 0.0
-
-    # --- A2: correlation adjacency (binary), force symmetric, drop self loops ---
     import pickle as _pkl
     with open(corr_pkl_path, "rb") as f:
-        co = _pkl.load(f)  # expected shape (V, V), dtype numeric (0/1)
+        co = _pkl.load(f)
     A_corr = co if isinstance(co, torch.Tensor) else torch.tensor(co, dtype=torch.float32)
     if A_corr.shape != (V, V):
         raise ValueError(f"Correlation matrix shape {A_corr.shape} != ({V}, {V})")
     A_corr = 0.5 * (A_corr + A_corr.t())
     A_corr.fill_diagonal_(0.0)
 
-    A_list = [A_self, A_freq, A_corr]
+    return torch.stack([A_self, A_corr], dim=0)  # (2,V,V)
 
-    # --- optionally add ONE 17x17 causality layer ---
-    if add_causality:
-        caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
-        with open(caus_path, "rb") as f:
-            C = _pkl.load(f)  # expected (238, 238) = (17*14, 17*14)
-        C = C if isinstance(C, torch.Tensor) else torch.tensor(C, dtype=torch.float32)
-        if C.shape != (V*14, V*14):
-            raise ValueError(f"Causality matrix must be ({V*14},{V*14}); got {tuple(C.shape)}")
 
-        # abs, then average pooling (kernel=14, stride=14) to collapse features->sensors
-        # reshape to NCHW for pooling: (1,1,238,238)
-        C_abs = C.abs().unsqueeze(0).unsqueeze(0)  # (1,1,238,238)
-        A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14))  # (1,1,17,17)
-        A_caus = A_caus.squeeze(0).squeeze(0)  # (17,17)
+def add_one_causality_layer(A_base2: torch.Tensor, V: int, thresh: float) -> torch.Tensor:
+    """
+    Append ONE pooled causality layer to base A (K=2 -> K=3).
+    Build from PCMCI 238x238 (17*14 x 17*14):
+      |C| -> avg_pool2d(kernel=14, stride=14) -> (17x17) -> >thresh -> 1/0 -> diag=0
+    """
+    caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
+    if not caus_path.exists():
+        print(f"[WARN] causality file not found at {caus_path}, keeping K=2")
+        return A_base2
 
-        # threshold > 0.5 -> 1 else 0; drop self-loops
-        A_caus = (A_caus > 0.5).to(torch.float32)
-        A_caus.fill_diagonal_(0.0)
+    import pickle as _pkl
+    with open(caus_path, "rb") as f:
+        C = _pkl.load(f)
+    C = C if isinstance(C, torch.Tensor) else torch.tensor(C, dtype=torch.float32)
+    if C.shape != (V * 14, V * 14):
+        raise ValueError(f"Causality matrix must be ({V*14},{V*14}); got {tuple(C.shape)}")
 
-        A_list.append(A_caus)
+    C_abs = C.abs().unsqueeze(0).unsqueeze(0)  # (1,1,238,238)
+    A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14)).squeeze(0).squeeze(0)  # (17,17)
+    A_caus = (A_caus > float(thresh)).to(torch.float32)
+    A_caus.fill_diagonal_(0.0)
 
-    A = torch.stack(A_list, dim=0)  # K=3 (no causality) or K=4 (with causality)
-    return A
+    return torch.cat([A_base2, A_caus.unsqueeze(0)], dim=0)  # (3,V,V)
+
 
 # -----------------------
-# Model factory (added)
+# Model factory
 # -----------------------
 def _model_needs_graph(name: str) -> bool:
     name = name.lower()
@@ -313,10 +270,10 @@ def train_one_epoch(
     scaler: torch.cuda.amp.GradScaler = None,
     scheduler: torch.optim.lr_scheduler._LRScheduler = None,
     grad_clip: float = 0.0,
-) -> Tuple[float, float, List[float]]:
+) -> Tuple[float, float, List[float], List[float]]:
     """
     Returns:
-      avg_total_loss, avg_mse_loss (RUL), avg_macro_precisions (per status head)
+      avg_total_loss, avg_mse_loss (RUL), avg_macro_precisions (per status head), avg_CE (per head)
     """
     model.train()
     mse_loss_fn = nn.MSELoss()
@@ -333,27 +290,20 @@ def train_one_epoch(
         rul = rul.to(device, non_blocking=True).float().view(-1, 1)  # (N,1)
         status = status.to(device, non_blocking=True).long()         # (N,4)
 
-
         optimizer.zero_grad(set_to_none=True)
 
-        _check_finite("x", x)
         if scaler is not None:
             with torch.amp.autocast(device_type="cuda"):
-                out = model(x)  # {"rul": (N,1), "status_logits": [ (N,Ci), ... ]}
-                rul_pred = out["rul"]            # (N,1), model already has Sigmoid
+                out = model(x)
+                rul_pred = out["rul"]            # (N,1)
                 logits_list = out["status_logits"]
-                _check_finite("rul_pred", rul_pred)
-                for i, logits in enumerate(logits_list):
-                    _check_finite(f"status_logits[{i}]", logits)
-                loss_rul = mse_loss_fn(rul_pred, rul)
 
+                loss_rul = mse_loss_fn(rul_pred, rul)
                 loss_status = 0.0
-                for i, num_cls in enumerate(status_classes):
-                    logits = logits_list[i]       # (N, num_cls)
-                    targets_i = status[:, i]      # (N,)
-                    ce = ce_loss_fn(logits, targets_i)
-                    loss_status = loss_status + ce
+                for i, _ in enumerate(status_classes):
+                    ce = ce_loss_fn(logits_list[i], status[:, i])
                     ce_sums[i] += float(ce.item())
+                    loss_status = loss_status + ce
 
                 loss = rul_weight * loss_rul + status_weight * loss_status
         else:
@@ -362,16 +312,12 @@ def train_one_epoch(
             logits_list = out["status_logits"]
             loss_rul = mse_loss_fn(rul_pred, rul)
             loss_status = 0.0
-            for i, num_cls in enumerate(status_classes):
-                logits = logits_list[i]       # (N, num_cls)
-                targets_i = status[:, i]      # (N,)
-                ce = ce_loss_fn(logits, targets_i)
-                loss_status = loss_status + ce
+            for i, _ in enumerate(status_classes):
+                ce = ce_loss_fn(logits_list[i], status[:, i])
                 ce_sums[i] += float(ce.item())
-
+                loss_status = loss_status + ce
             loss = rul_weight * loss_rul + status_weight * loss_status
 
-        # backward + step
         if scaler is not None:
             scaler.scale(loss).backward()
             if grad_clip and grad_clip > 0:
@@ -388,7 +334,6 @@ def train_one_epoch(
         if scheduler is not None:
             scheduler.step()
 
-        # metrics (detach to avoid holding graph)
         total_loss += float(loss.item())
         total_mse  += float(loss_rul.item())
 
@@ -401,7 +346,7 @@ def train_one_epoch(
     avg_loss = total_loss / max(1, num_batches)
     avg_mse  = total_mse  / max(1, num_batches)
     avg_precs = [p / max(1, num_batches) for p in prec_sums]
-    avg_ces = [s / max(1, num_batches) for s in ce_sums]
+    avg_ces = [c / max(1, num_batches) for c in ce_sums]
     return avg_loss, avg_mse, avg_precs, avg_ces
 
 
@@ -413,16 +358,15 @@ def evaluate(
     status_classes: List[int],
     rul_weight: float,
     status_weight: float,
-) -> Tuple[float, float, List[float], float]:
+) -> Tuple[float, float, List[float], float, List[float]]:
     """
     Returns:
-      avg_total_loss, avg_mse_loss (RUL), avg_macro_precisions (per status head), RMSE(RUL)
+      avg_total_loss, avg_mse_loss (RUL), avg_macro_precisions (per status head), RMSE(RUL), avg_CE (per head)
     """
     model.eval()
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.05)
-    ce_sums = [0.0 for _ in status_classes]  # for status losses
-
+    ce_sums = [0.0 for _ in status_classes]
     total_loss = 0.0
     total_mse  = 0.0
     prec_sums = [0.0 for _ in status_classes]
@@ -439,12 +383,10 @@ def evaluate(
 
         loss_rul = mse_loss_fn(rul_pred, rul)
         loss_status = 0.0
-        for i, num_cls in enumerate(status_classes):
-            logits = logits_list[i]
-            targets_i = status[:, i]
-            ce = ce_loss_fn(logits, targets_i)
-            loss_status = loss_status + ce
+        for i, _ in enumerate(status_classes):
+            ce = ce_loss_fn(logits_list[i], status[:, i])
             ce_sums[i] += float(ce.item())
+            loss_status = loss_status + ce
 
         loss = rul_weight * loss_rul + status_weight * loss_status
 
@@ -458,9 +400,10 @@ def evaluate(
     avg_loss = total_loss / max(1, num_batches)
     avg_mse  = total_mse  / max(1, num_batches)
     avg_precs = [p / max(1, num_batches) for p in prec_sums]
-    avg_ces = [s / max(1, num_batches) for s in ce_sums]
+    avg_ces = [c / max(1, num_batches) for c in ce_sums]
     rmse_val = math.sqrt(avg_mse) if avg_mse >= 0.0 else float('nan')
     return avg_loss, avg_mse, avg_precs, rmse_val, avg_ces
+
 
 def _check_finite(tag: str, t: torch.Tensor):
     if not torch.isfinite(t).all():
@@ -468,15 +411,17 @@ def _check_finite(tag: str, t: torch.Tensor):
         print(f"[NaN/Inf] in {tag} at indices: {bad[:5].tolist()} ...")
         raise RuntimeError(f"{tag} contains NaN/Inf")
 
+
 # -----------------------
 # Main
 # -----------------------
 def main():
-    # CLI flag: --add-causality (default False)
+    # CLI flags: --add-causality, --causality-thresh
     parser = argparse.ArgumentParser()
     parser.add_argument("--add-causality", action="store_true",
-                        help="Append 1 causality layers to adjacency A; "
-                             "logs under <model>_with_causality_experiment/.")
+                        help="Append ONE pooled causality layer to adjacency A (base K=2 -> K=3).")
+    parser.add_argument("--causality-thresh", type=float, default=0.5,
+                        help="Threshold in [0,1] for causality mask (default 0.5).")
     args, _ = parser.parse_known_args()
 
     # Defaults (overridden by configs/stgcn.yaml if present)
@@ -490,7 +435,7 @@ def main():
         "grad_clip": 1.0,
         "use_amp": False,
         "val_every": 1,
-        "status_classes": [3, 4, 3, 4],    
+        "status_classes": [3, 4, 3, 4],
         "in_channels": 24,
         "channels": [64, 32, 10],
         "temporal_kernel": [3, 3, 2],
@@ -505,8 +450,8 @@ def main():
         "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
         "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
         "run_root":  str(BASE_DIR / "runs"),
-        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "with_1_causality"),
-        # added
+        "ckpt_dir":  str(BASE_DIR / "checkpoints" / "causality_long_test"),
+        # model choice
         "model": "stgcn",
         "T": 6,
         # alt-model params
@@ -522,22 +467,30 @@ def main():
         "it_depth": 6,
         "it_bottleneck": 32,
         "it_kernels": [3, 5, 7],
-        # causality toggle (default false; overridden by CLI)
+        # adjacency toggles
         "add_causality": False,
+        "causality_thresh": 0.5,
     }
 
     cfg_path = BASE_DIR / "configs" / "stgcn.yaml"
     cfg = load_yaml_config(default_cfg, cfg_path)
-    # CLI override
+
+    # Apply CLI overrides
     cfg["add_causality"] = bool(args.add_causality)
+    if args.causality_thresh is not None:
+        t = float(args.causality_thresh)
+        if not (0.0 <= t <= 1.0):
+            raise ValueError("--causality-thresh must be in [0.0, 1.0]")
+        cfg["causality_thresh"] = t
 
     seed_everything(cfg["seed"])
     torch.autograd.set_detect_anomaly(True)
+
     device = torch.device(cfg["device"])
 
-    # honor env override for model
+    # honor env override
     cfg["model"] = os.getenv("MODEL", cfg.get("model", "stgcn"))
-    print(f"Using model: {cfg['model']}; add_causality={cfg['add_causality']}")
+    print(f"Using model: {cfg['model']}; add_causality={cfg['add_causality']} thresh={cfg['causality_thresh']}")
 
     # --- Logging dirs ---
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -572,15 +525,24 @@ def main():
         pin_memory=cfg["pin_memory"],
     )
 
-    # --- Model ---
+    # --- Model / Adjacency ---
     V = 17  # number of nodes
     A = None
     if _model_needs_graph(cfg["model"]):
         corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
-        A = make_partitioned_adj_from_specs(V, corr_pkl, cfg["add_causality"])
-        names = ["A_self (identity)", "A_freq (within-group)", "A_corr (binary, sym)"]
+        # Base K=2 (self + corr)
+        A2 = make_partitioned_base2(V, corr_pkl_path=corr_pkl)
+        # Optional ONE pooled causality -> K=3
+        if cfg["add_causality"]:
+            A = add_one_causality_layer(A2, V=V, thresh=cfg["causality_thresh"])
+            names = ["A_self (identity)", "A_corr (binary, sym)", f"A_caus (pooled, thr>{cfg['causality_thresh']})"]
+        else:
+            A = A2
+            names = ["A_self (identity)", "A_corr (binary, sym)"]
+
         print(f"A shape: {tuple(A.shape)}  (K, V, V)")
         print_adj_binary(A, names, sep="")
+        # quick stats
         for k, name in enumerate(names):
             deg = A[k].sum(dim=1)
             print(f"{name}: nnz={int(A[k].count_nonzero())}, degree range=({deg.min().item():.0f},{deg.max().item():.0f})")
@@ -640,7 +602,10 @@ def main():
         # --- Checkpoint ---
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_path = ckpt_dir / f"{cfg['model']}_best.pt"
+            if(cfg["add_causality"]):
+                best_path = ckpt_dir / f"{cfg['model']}_causality_{cfg['causality_thresh']}_best.pt"
+            else:
+                best_path = ckpt_dir / f"{cfg['model']}_best.pt"
             torch.save(
                 {
                     "epoch": epoch,

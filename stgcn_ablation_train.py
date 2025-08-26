@@ -3,14 +3,21 @@
 
 """
 Ablation training for ST-GCN (residual-attention variant) on HSTI.
-Trains FOUR models, each with ONE of the 4 adjacency partitions zeroed (removed in effect):
+
+This version COMPLETELY REMOVES the frequency partition.
+Base adjacency now has only TWO layers:
   [0] A_self (identity)
-  [1] A_freq (within-group fully-connected, no self)
-  [2] A_corr (binary correlation, sym, no self)
-  [3] A_caus (ONE pooled causality layer built from 238x238 PCMCI)
+  [1] A_corr (binary correlation, sym, no self)
+We then add ONE pooled causality layer:
+  [2] A_caus (ONE pooled causality layer built from 238x238 PCMCI)
+
+We train THREE ablation models, each with ONE of these partitions zeroed:
+  "no_self"        -> A[0] = 0
+  "no_corr"        -> A[1] = 0
+  "no_causality"   -> A[2] = 0
 
 Why zero (not drop) a layer?
-- K stays 4 for all ablations => identical parameter counts and architecture.
+- K stays 3 for all ablations => identical parameter counts and architecture.
 - Only the information content of that partition is removed.
 
 Logging / Checkpoints:
@@ -24,7 +31,7 @@ Usage (typical):
 By default, this script:
 - Uses the same pickles as stgcn_train.py (train_stgcn.pkl / val_stgcn.pkl)
 - Uses STGCN_residual_attention backbone only
-- Builds K=4 adjacency (3 base + 1 pooled-causality), then zeros one partition per run
+- Builds K=3 adjacency (self + corr + pooled-causality), then zeros one partition per run
 """
 
 import os
@@ -42,32 +49,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from datasets.stgcn_data_loader import STGCNDataset  
-
+from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401 (kept for parity)
 
 BASE_DIR = Path(__file__).resolve().parent
 
 # -----------------------
-# Adjacency builders
+# Adjacency builders (NO FREQUENCY PARTITION)
 # -----------------------
-def make_partitioned_base3(V: int, corr_pkl_path: Path) -> torch.Tensor:
-    """Return K=3 base partitions: identity, within-group (no self), correlation (sym, no self)."""
-    sensors_100hz = ["PS1","PS2","PS3","PS4","PS5","PS6","EPS1"]
-    sensors_10hz  = ["FS1","FS2"]
-    sensors_1hz   = ["TS1","TS2","TS3","TS4","VS1","SE","CE","CP"]
-    assert V == (len(sensors_100hz) + len(sensors_10hz) + len(sensors_1hz)), "V must be 17."
-
-    idx_100 = list(range(0, len(sensors_100hz)))                        # 0..6
-    idx_10  = list(range(idx_100[-1] + 1, idx_100[-1] + 1 + 2))         # 7..8
-    idx_1   = list(range(idx_10[-1] + 1, idx_10[-1] + 1 + len(sensors_1hz)))  # 9..16
-
+def make_partitioned_base2(V: int, corr_pkl_path: Path) -> torch.Tensor:
+    """Return K=2 base partitions: identity (self), correlation (sym, no self)."""
     A_self = torch.eye(V, dtype=torch.float32)
-
-    A_freq = torch.zeros(V, V, dtype=torch.float32)
-    for group in [idx_100, idx_10, idx_1]:
-        g = torch.tensor(group, dtype=torch.long)
-        A_freq[g[:, None], g[None, :]] = 1.0
-        A_freq[g, g] = 0.0
 
     with open(corr_pkl_path, "rb") as f:
         co = pickle.load(f)
@@ -77,17 +68,17 @@ def make_partitioned_base3(V: int, corr_pkl_path: Path) -> torch.Tensor:
     A_corr = 0.5 * (A_corr + A_corr.t())
     A_corr.fill_diagonal_(0.0)
 
-    return torch.stack([A_self, A_freq, A_corr], dim=0)  # (3,V,V)
+    return torch.stack([A_self, A_corr], dim=0)  # (2,V,V)
 
-def add_one_causality_layer(A_base3: torch.Tensor, V: int, caus_path: Path) -> torch.Tensor:
+def add_one_causality_layer(A_base2: torch.Tensor, V: int, caus_path: Path) -> torch.Tensor:
     """
-    Append ONE pooled causality layer to base A (K=3 -> K=4).
+    Append ONE pooled causality layer to base A (K=2 -> K=3).
     |C| (238x238) -> avg_pool2d(kernel=14,stride=14) -> (17x17) -> >0.5 -> 1/0 -> diag=0.
-    Assumes sensor-major feature ordering in 238x238 matrix.
+    Assumes sensor-major feature ordering in 238x238 PCMCI matrix.
     """
     if not caus_path.exists():
-        print(f"[WARN] causality file not found at {caus_path}, keeping K=3")
-        return A_base3
+        print(f"[WARN] causality file not found at {caus_path}, keeping K=2")
+        return A_base2
     with open(caus_path, "rb") as f:
         C = pickle.load(f)
     C = C if isinstance(C, torch.Tensor) else torch.tensor(C, dtype=torch.float32)
@@ -98,11 +89,11 @@ def add_one_causality_layer(A_base3: torch.Tensor, V: int, caus_path: Path) -> t
     A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14)).squeeze(0).squeeze(0)  # (17,17)
     A_caus = (A_caus > 0.5).to(torch.float32)
     A_caus.fill_diagonal_(0.0)
-    return torch.cat([A_base3, A_caus.unsqueeze(0)], dim=0)  # (4,V,V)
+    return torch.cat([A_base2, A_caus.unsqueeze(0)], dim=0)  # (3,V,V)
 
-def zero_one_partition(A4: torch.Tensor, idx: int) -> torch.Tensor:
-    """Return a copy of A4 (K=4) with partition `idx` zeroed out (keeps K=4, params constant)."""
-    A = A4.clone()
+def zero_one_partition(A3: torch.Tensor, idx: int) -> torch.Tensor:
+    """Return a copy of A3 (K=3) with partition `idx` zeroed out (keeps K=3, params constant)."""
+    A = A3.clone()
     A[idx].zero_()
     return A
 
@@ -296,7 +287,6 @@ def main():
     ap.add_argument("--ckpt-dir",  type=str, default=str(BASE_DIR / "checkpoints" / "stgcn_ablation"))
     args = ap.parse_args()
 
-    # config (only the bits we need)
     cfg: Dict[str, Any] = {
         "seed": args.seed,
         "device": args.device,
@@ -318,7 +308,6 @@ def main():
         "pin_memory": True,
     }
 
-    # seed & device
     def seed_everything(seed: int) -> None:
         import random, numpy as np
         random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed); np.random.seed(seed)
@@ -341,20 +330,18 @@ def main():
         num_workers=cfg["num_workers"], pin_memory=cfg["pin_memory"]
     )
 
-    # Build K=4 adjacency once (3 base + 1 pooled causality)
+    # Build K=3 adjacency once (base2 + 1 pooled causality)
     V = 17
     corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
     caus_pkl = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
-    A3 = make_partitioned_base3(V, corr_pkl)
-    A4 = add_one_causality_layer(A3, V, caus_pkl).to(device)  # (4,17,17)
+    A2 = make_partitioned_base2(V, corr_pkl)         # (2,17,17): self + corr
+    A3 = add_one_causality_layer(A2, V, caus_pkl).to(device)  # (3,17,17)
 
-    # Ablation variants: zero one partition each time.
-    # Indices: 0=self, 1=freq, 2=corr, 3=causality
+    # Ablation variants: zero one partition each time (0=self, 1=corr, 2=causality)
     ablations = [
         ("no_self",        0),
-        ("no_freq",        1),
-        ("no_corr",        2),
-        ("no_causality",   3),
+        ("no_corr",        1),
+        ("no_causality",   2),
     ]
 
     results_summary = []
@@ -370,8 +357,8 @@ def main():
         print(f"\n===== Ablation: {tag} (zero partition index {idx}) =====")
         print("TensorBoard:", writer.log_dir)
 
-        # zero the chosen partition (keep K=4)
-        A_abl = zero_one_partition(A4, idx)
+        # zero the chosen partition (keep K=3)
+        A_abl = zero_one_partition(A3, idx)
 
         # build model
         model = build_residual_attention_stgcn(cfg, device, A=A_abl)

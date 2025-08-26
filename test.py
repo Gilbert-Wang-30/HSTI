@@ -2,18 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Evaluate best checkpoints of all backbones on the TEST set and print comparisons.
-- Loads checkpoints from one or more roots (e.g., checkpoints/stgcn, checkpoints/with_causalities, checkpoints/with_1_causality)
-- Uses pickles from configs YAML (expects test_stgcn.pkl)
-- Metrics over the entire test set:
-    total loss (MSE + sum CE), RUL MSE/RMSE,
-    per-head micro accuracy, per-head macro precision
-- Also reports: parameter count, model size (MB), forward speed (avg ms / throughput)
-- Prints per-model metrics and a ranked summary.
-
-Usage:
-  python3 test.py --config configs/stgcn.yaml
-  python3 test.py --models stgcn,stgcn_no_attention,stgcn_residual_attention,tcn,dcrnn,inception_time --device cuda
-  python3 test.py --ckpt-roots checkpoints/stgcn,checkpoints/with_causalities,checkpoints/with_1_causality
+- Loads checkpoints from one or more roots (e.g., checkpoints/stgcn, checkpoints/with_causalities,
+  checkpoints/with_1_causality, checkpoints/stgcn_ablation, checkpoints/causality_test)
+- Supports suffixed filenames like: <model>_<suffix>_best.pt  (e.g., thresholds 0.1, 0.75, etc.)
+- Infers K (=2/3/17) from checkpoint and builds a matching test adjacency.
+- Reports: total loss, RUL MSE/RMSE, per-head micro acc & macro precision, params, size, speed.
 """
 
 import os
@@ -29,11 +22,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401 (kept for clarity / parity)
+from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# ---------- Config ----------
+# ---------------- Config / utils ----------------
 def load_yaml_config(default_cfg: Dict[str, Any], yaml_path: Path) -> Dict[str, Any]:
     cfg = default_cfg.copy()
     if yaml_path.exists():
@@ -49,15 +42,13 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
-# ---------- Metrics ----------
 def micro_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return float((preds == targets).float().mean().item())
 
 def macro_precision(logits: torch.Tensor, targets: torch.Tensor, num_classes: int) -> float:
     preds = logits.argmax(dim=1)
-    precs = []
-    eps = 1e-8
+    precs, eps = [], 1e-8
     for c in range(num_classes):
         tp = ((preds == c) & (targets == c)).sum().item()
         fp = ((preds == c) & (targets != c)).sum().item()
@@ -70,63 +61,64 @@ def check_finite(tag: str, t: torch.Tensor):
         print(f"[NaN/Inf] in {tag} at indices: {bad[:5].tolist()} ...")
         raise RuntimeError(f"{tag} contains NaN/Inf")
 
-# ---------- Adjacency (matches train) ----------
-def make_partitioned_adj_from_specs(V: int, corr_pkl_path: Path) -> torch.Tensor:
-    sensors_100hz = ["PS1","PS2","PS3","PS4","PS5","PS6","EPS1"]
-    sensors_10hz  = ["FS1","FS2"]
-    sensors_1hz   = ["TS1","TS2","TS3","TS4","VS1","SE","CE","CP"]
-    assert V == (len(sensors_100hz) + len(sensors_10hz) + len(sensors_1hz)), "V must be 17."
-    idx_100 = list(range(0, len(sensors_100hz)))
-    idx_10  = list(range(idx_100[-1] + 1, idx_100[-1] + 1 + len(sensors_10hz)))
-    idx_1   = list(range(idx_10[-1] + 1, idx_10[-1] + 1 + len(sensors_1hz)))
-
+# ---------------- Adjacency builders ----------------
+def make_partitioned_base3(V: int, corr_pkl_path: Path) -> torch.Tensor:
+    """Back-compat base3 (self + freq + corr)."""
+    # identity
     A_self = torch.eye(V, dtype=torch.float32)
+    # freq blocks
+    idx_100 = list(range(0, 7))
+    idx_10  = list(range(7, 9))
+    idx_1   = list(range(9, 17))
     A_freq = torch.zeros(V, V, dtype=torch.float32)
     for group in [idx_100, idx_10, idx_1]:
         g = torch.tensor(group, dtype=torch.long)
         A_freq[g[:, None], g[None, :]] = 1.0
         A_freq[g, g] = 0.0
-
+    # correlation
     with open(corr_pkl_path, "rb") as f:
         co = pickle.load(f)
     A_corr = co if isinstance(co, torch.Tensor) else torch.tensor(co, dtype=torch.float32)
-    A_corr = 0.5 * (A_corr + A_corr.t()); A_corr.fill_diagonal_(0.0)
-
+    if A_corr.shape != (V, V):
+        raise ValueError(f"Correlation matrix shape {A_corr.shape} != ({V}, {V})")
+    A_corr = 0.5 * (A_corr + A_corr.t())
+    A_corr.fill_diagonal_(0.0)
     return torch.stack([A_self, A_freq, A_corr], dim=0)
 
+def make_partitioned_base2(V: int, corr_pkl_path: Path) -> torch.Tensor:
+    """Base2 (self + corr), no frequency partition."""
+    A_self = torch.eye(V, dtype=torch.float32)
+    with open(corr_pkl_path, "rb") as f:
+        co = pickle.load(f)
+    A_corr = co if isinstance(co, torch.Tensor) else torch.tensor(co, dtype=torch.float32)
+    if A_corr.shape != (V, V):
+        raise ValueError(f"Correlation matrix shape {A_corr.shape} != ({V}, {V})")
+    A_corr = 0.5 * (A_corr + A_corr.t())
+    A_corr.fill_diagonal_(0.0)
+    return torch.stack([A_self, A_corr], dim=0)
+
 def add_causality_layers(A_base: torch.Tensor, V: int) -> torch.Tensor:
-    """
-    Append 14 causality layers (one per HL feature) to base A.
-    PCMCI file: data/causality/pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl
-    Threshold: |val| > 0.5 -> 1 else 0; diagonal zero.
-    Assumes sensor-major ordering in the 238x238 matrix: idx = sensor*14 + feat.
-    """
+    """Append 14 causality layers (K += 14)."""
     caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
     if not caus_path.exists():
-        print(f"[WARN] causality file not found at {caus_path}, skipping causality layers")
+        print(f"[WARN] causality file not found at {caus_path}, skipping 14-layer causality")
         return A_base
     with open(caus_path, "rb") as f:
         C = pickle.load(f)
     C = torch.as_tensor(C, dtype=torch.float32)
     if C.shape != (V*14, V*14):
         raise ValueError(f"Causality matrix must be {(V*14, V*14)}; got {tuple(C.shape)}")
-
     layers = []
     for feat in range(14):
         idx = torch.tensor([s*14 + feat for s in range(V)], dtype=torch.long)
-        sub = C.index_select(0, idx).index_select(1, idx)  # (V,V)
+        sub = C.index_select(0, idx).index_select(1, idx)
         A_feat = ((sub > 0.5) | (sub < -0.5)).to(torch.float32)
         A_feat.fill_diagonal_(0.0)
         layers.append(A_feat)
-    A_causal = torch.stack(layers, dim=0)  # (14,V,V)
-    return torch.cat([A_base, A_causal], dim=0)  # (3+14,V,V)
+    return torch.cat([A_base, torch.stack(layers, dim=0)], dim=0)
 
-def add_one_causality_layer(A_base: torch.Tensor, V: int) -> torch.Tensor:
-    """
-    Append ONE pooled causality layer to base A.
-    Steps: abs(238x238) -> avg_pool2d(kernel=14,stride=14) -> (17x17) -> >0.5 -> 1 else 0 -> diag=0
-    Assumes sensor-major feature ordering: idx = sensor*14 + feat.
-    """
+def add_one_causality_layer(A_base: torch.Tensor, V: int, thresh: float = 0.5) -> torch.Tensor:
+    """Append ONE pooled causality layer (K += 1)."""
     caus_path = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
     if not caus_path.exists():
         print(f"[WARN] causality file not found at {caus_path}, skipping one-layer causality")
@@ -136,20 +128,17 @@ def add_one_causality_layer(A_base: torch.Tensor, V: int) -> torch.Tensor:
     C = torch.as_tensor(C, dtype=torch.float32)
     if C.shape != (V*14, V*14):
         raise ValueError(f"Causality matrix must be {(V*14, V*14)}; got {tuple(C.shape)}")
-
-    C_abs = C.abs().unsqueeze(0).unsqueeze(0)  # (1,1,238,238)
-    A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14))  # (1,1,17,17)
-    A_caus = A_caus.squeeze(0).squeeze(0)  # (17,17)
-    A_caus = (A_caus > 0.5).to(torch.float32)
+    C_abs = C.abs().unsqueeze(0).unsqueeze(0)              # (1,1,238,238)
+    A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14)).squeeze(0).squeeze(0)  # (17,17)
+    A_caus = (A_caus > thresh).to(torch.float32)
     A_caus.fill_diagonal_(0.0)
-
-    return torch.cat([A_base, A_caus.unsqueeze(0)], dim=0)  # (3+1,V,V)
+    return torch.cat([A_base, A_caus.unsqueeze(0)], dim=0)
 
 def model_needs_graph(name: str) -> bool:
     n = name.lower()
     return n in ("stgcn", "stgcn_no_attention", "stgcn_residual_attention", "dcrnn")
 
-# ---------- Model factory  ----------
+# ---------------- Model factory ----------------
 def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.Tensor = None) -> nn.Module:
     name = name.lower()
     status_classes = cfg["status_classes"]; in_channels = cfg["in_channels"]
@@ -199,13 +188,11 @@ def build_model(name: str, cfg: Dict[str, Any], device: torch.device, A: torch.T
         raise ValueError(f"Unknown model {name}")
     return model.to(device)
 
-# ---------- Param & speed ----------
+# ---------------- Params / speed ----------------
 def count_params_and_size_mb(m: nn.Module) -> Tuple[int, int, float]:
     total = sum(p.numel() for p in m.parameters())
     trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
-    bytes_total = 0
-    for p in m.parameters():
-        bytes_total += p.numel() * p.element_size()
+    bytes_total = sum(p.numel() * p.element_size() for p in m.parameters())
     size_mb = bytes_total / (1024**2)
     return total, trainable, size_mb
 
@@ -213,12 +200,8 @@ def sync_if_cuda(device: torch.device):
     if device.type == "cuda":
         torch.cuda.synchronize()
 
-def benchmark_forward(model: nn.Module,
-                      x: torch.Tensor,
-                      device: torch.device,
-                      warmup: int = 5,
-                      iters: int = 20) -> Tuple[float, float]:
-    """Return (avg_ms_per_forward, throughput_samples_per_s) on a single batch."""
+def benchmark_forward(model: nn.Module, x: torch.Tensor, device: torch.device,
+                      warmup: int = 5, iters: int = 20) -> Tuple[float, float]:
     model.eval()
     with torch.no_grad():
         for _ in range(warmup):
@@ -233,11 +216,17 @@ def benchmark_forward(model: nn.Module,
     thr = (x.size(0) * iters) / ((avg_ms * iters) / 1000.0)
     return avg_ms, thr
 
-# ---------- Evaluation ----------
+# ---------------- Infer K from checkpoint ----------------
+def infer_k_from_checkpoint(state: dict) -> int:
+    ms = state.get("model_state", {})
+    for key, tensor in ms.items():
+        if key.endswith(".A") and hasattr(tensor, "dim") and tensor.dim() == 3:
+            return int(tensor.size(0))
+    return -1
+
+# ---------------- Eval loop ----------------
 @torch.no_grad()
-def evaluate_model(model: nn.Module,
-                   loader: DataLoader,
-                   device: torch.device,
+def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device,
                    status_classes: List[int]) -> Dict[str, Any]:
     mse_loss_fn = nn.MSELoss()
     ce_loss_fn  = nn.CrossEntropyLoss(label_smoothing=0.05)
@@ -245,7 +234,6 @@ def evaluate_model(model: nn.Module,
     total_samples = 0
     sum_total_loss = 0.0
     sum_mse = 0.0
-
     sum_ce = [0.0]*len(status_classes)
     correct = [0]*len(status_classes)
     tp = [torch.zeros(n, dtype=torch.long) for n in status_classes]
@@ -253,7 +241,7 @@ def evaluate_model(model: nn.Module,
 
     for batch in loader:
         if not (isinstance(batch, (tuple, list)) and len(batch) == 3):
-            raise RuntimeError(f"Expected (x,rul,status); got {type(batch).__name__} len={len(batch) if hasattr(batch,'__len__') else 'NA'}")
+            raise RuntimeError("Expected (x,rul,status); got something else")
         x, rul, status = batch
         x = x.to(device).float()
         rul = rul.to(device).float().view(-1,1)
@@ -282,13 +270,11 @@ def evaluate_model(model: nn.Module,
                 tp[j][c] += int(((preds == c) & (status[:, j] == c)).sum().item())
                 fp[j][c] += int(((preds == c) & (status[:, j] != c)).sum().item())
 
-        total = float((loss_rul + loss_status).item()) * bs
-        sum_total_loss += total
+        sum_total_loss += float((loss_rul + loss_status).item()) * bs
 
     avg_total_loss = sum_total_loss / max(1, total_samples)
     avg_mse = sum_mse / max(1, total_samples)
     rmse = math.sqrt(avg_mse)
-
     ce_avg = [c / max(1, total_samples) for c in sum_ce]
     micro_acc = [correct[j] / max(1, total_samples) for j in range(len(status_classes))]
 
@@ -309,7 +295,7 @@ def evaluate_model(model: nn.Module,
         "status_macro_prec": macro_prec,
     }
 
-# ---------- Main ----------
+# ---------------- Main ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default=str(BASE_DIR / "configs" / "stgcn.yaml"))
@@ -320,7 +306,7 @@ def main():
     ap.add_argument("--bench-warmup", type=int, default=5)
     ap.add_argument("--bench-iters", type=int, default=20)
     ap.add_argument("--ckpt-roots", type=str,
-                    default="checkpoints/stgcn,checkpoints/with_causalities,checkpoints/with_1_causality",
+                    default="checkpoints/stgcn,checkpoints/with_causalities,checkpoints/with_1_causality,checkpoints/stgcn_ablation,checkpoints/causality_test",
                     help="comma-separated checkpoint roots to scan")
     args = ap.parse_args()
 
@@ -331,11 +317,9 @@ def main():
         "status_classes": [3,4,3,4],
         "in_channels": 24,
         "T": 6,
-        # paths
         "train_pkl": str(BASE_DIR / "data" / "processed" / "train_stgcn.pkl"),
         "val_pkl":   str(BASE_DIR / "data" / "processed" / "val_stgcn.pkl"),
         "test_pkl":  str(BASE_DIR / "data" / "processed" / "test_stgcn.pkl"),
-        # backbone defaults (used if YAML missing)
         "channels": [64,32,10],
         "temporal_kernel": [3,3,2],
         "dropout": 0.0,
@@ -348,98 +332,114 @@ def main():
     device = torch.device(cfg["device"])
     seed_everything(cfg["seed"])
 
-    # Load TEST set
+    # Data
     with open(cfg["test_pkl"], "rb") as f:
         test_dataset = pickle.load(f)
     test_loader = DataLoader(test_dataset, batch_size=cfg["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
 
-    # Prepare one batch for speed benchmark (first batch of test set)
+    # Bench batch
     try:
-        bench_batch = next(iter(test_loader))
-        if isinstance(bench_batch, (tuple, list)) and len(bench_batch) == 3:
-            x_bench = bench_batch[0].to(device).float()
-        else:
-            raise RuntimeError("Unexpected batch structure for speed benchmark.")
+        x_bench = next(iter(test_loader))[0].to(device).float()
     except StopIteration:
         x_bench = None
 
-    # Compare across multiple checkpoint roots
     ckpt_roots = [BASE_DIR / p.strip() for p in args.ckpt_roots.split(",")]
-    names = [m.strip() for m in args.models.split(",")]
+    model_names = [m.strip() for m in args.models.split(",")]
 
     results = []
+    corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
+
     for root in ckpt_roots:
-        # Build adjacency for this root if any requested model needs it
-        need_graph = any(model_needs_graph(n) for n in names)
-        A_for_root = None
-        if need_graph:
-            corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
-            if corr_pkl.exists():
-                A_for_root = make_partitioned_adj_from_specs(17, corr_pkl)
-            else:
-                print("[WARN] correlation not found; using identity-only adjacency")
-                A_for_root = torch.stack([torch.eye(17)]*3, dim=0)
+        # Collect candidates: exact + suffixed (e.g., _0.75_best.pt)
+        def gather_candidates(model_name: str):
+            candidates = []
+            exact = root / f"{model_name}_best.pt"
+            if exact.exists():
+                candidates.append(("", exact))
+            for f in root.glob(f"{model_name}_*_best.pt"):
+                # suffix between model_ and _best.pt
+                s = f.name[len(model_name) + 1 : -8]
+                if s:  # avoid double-adding exact
+                    candidates.append((s, f))
+            return candidates
 
-            # Choose causality variant by checkpoint root name
-            if root.name == "with_causalities":
-                # old variant: append 14 layers (K=17 total)
-                A_for_root = add_causality_layers(A_for_root, V=17)
-            elif root.name == "with_1_causality":
-                # new variant: append ONE pooled layer (K=4 total)
-                A_for_root = add_one_causality_layer(A_for_root, V=17)
-
-            A_for_root = A_for_root.to(device)
-
-        for name in names:
-            print("\n" + "="*90)
-            print(f"[MODEL] {name}@{root.name} — loading best checkpoint and evaluating on TEST")
-            print("="*90)
-
-            model = build_model(name, cfg, device, A=A_for_root if model_needs_graph(name) else None)
-
-            ckpt_path = root / f"{name}_best.pt"
-            if not ckpt_path.exists():
-                print(f"[LOAD] No checkpoint found at {ckpt_path}. Skipping.")
-                continue
-            try:
-                state = torch.load(ckpt_path, map_location=device)
-                model.load_state_dict(state["model_state"], strict=False)
-                print(f"[LOAD] Loaded {ckpt_path}")
-            except Exception as e:
-                print(f"[LOAD] Failed to load {ckpt_path}: {e}")
+        for model_name in model_names:
+            cand = gather_candidates(model_name)
+            if not cand:
+                print(f"\n== {model_name}@{root.name}: no matching checkpoints ==")
                 continue
 
-            # Params & size
-            total_params, trainable_params, size_mb = count_params_and_size_mb(model)
-            print(f"Params: total={total_params:,}  trainable={trainable_params:,}  (~{size_mb:.2f} MB)")
+            for suffix, ckpt_path in cand:
+                label = f"{model_name}[{suffix}]" if suffix else model_name
+                print("\n" + "="*90)
+                print(f"[MODEL] {label}@{root.name} — loading best checkpoint and evaluating on TEST")
+                print("="*90)
 
-            # Speed (single batch)
-            if x_bench is not None:
-                fwd_ms, fwd_thr = benchmark_forward(model, x_bench, device,
-                                                    warmup=args.bench_warmup, iters=args.bench_iters)
-                print(f"Forward speed: {fwd_ms:.3f} ms/batch  |  throughput: {fwd_thr:.1f} samples/s")
-            else:
-                fwd_ms, fwd_thr = float('nan'), float('nan')
-                print("Forward speed: N/A (empty test loader)")
+                # Load checkpoint first to infer K
+                try:
+                    state = torch.load(ckpt_path, map_location=device)
+                except Exception as e:
+                    print(f"[LOAD] Failed to load {ckpt_path}: {e}")
+                    continue
 
-            # TEST metrics
-            metrics = evaluate_model(model, test_loader, device, cfg["status_classes"])
-            print(f"Total loss (test): {metrics['avg_total_loss']:.4f}")
-            print(f"RUL MSE / RMSE   : {metrics['rul_mse']:.6f} / {metrics['rul_rmse']:.6f}")
-            for j, (acc, mp) in enumerate(zip(metrics["status_micro_acc"], metrics["status_macro_prec"])):
-                print(f"status{j}: micro_acc={acc*100:.2f}%  macro_prec={mp*100:.2f}%  CE={metrics['status_ce'][j]:.4f}")
+                # Build adjacency to MATCH K in checkpoint
+                K_expected = infer_k_from_checkpoint(state)  # 2 / 3 / 17
+                if not corr_pkl.exists():
+                    print("[WARN] correlation not found; using identity-only fallback")
+                    A_use = torch.stack([torch.eye(17)]* (K_expected if K_expected>0 else 2), dim=0).to(device)
+                else:
+                    if K_expected == 2:
+                        # self + corr
+                        A_use = make_partitioned_base2(17, corr_pkl_path=corr_pkl).to(device)
+                    elif K_expected == 3:
+                        # self + corr + ONE causality (threshold used here doesn't matter;
+                        # checkpoint's buffers overwrite values; we only need matching SHAPE K=3)
+                        A_use = add_one_causality_layer(make_partitioned_base2(17, corr_pkl), V=17, thresh=0.5).to(device)
+                    elif K_expected == 17:
+                        # back-compat older K=17 checkpoints
+                        A_use = add_causality_layers(make_partitioned_base3(17, corr_pkl), V=17).to(device)
+                    else:
+                        # unknown -> default to base3 (back-compat)
+                        print(f"[WARN] Could not infer K (got {K_expected}); defaulting to base3.")
+                        A_use = make_partitioned_base3(17, corr_pkl).to(device)
 
-            results.append({
-                "name": f"{name}@{root.name}",
-                "root": root.name,
-                "params": total_params,
-                "size_mb": size_mb,
-                "fwd_ms": fwd_ms,
-                "fwd_thr": fwd_thr,
-                **metrics
-            })
+                # Build model, then load weights
+                model = build_model(model_name, cfg, device, A=A_use if model_needs_graph(model_name) else None)
+                try:
+                    model.load_state_dict(state["model_state"], strict=False)
+                    print(f"[LOAD] Loaded {ckpt_path}")
+                except Exception as e:
+                    print(f"[LOAD] Failed to load weights for {label}: {e}")
+                    continue
 
-    # Ranked summary
+                # Params & speed
+                total_params, trainable_params, size_mb = count_params_and_size_mb(model)
+                print(f"Params: total={total_params:,}  trainable={trainable_params:,}  (~{size_mb:.2f} MB)")
+                if x_bench is not None:
+                    fwd_ms, fwd_thr = benchmark_forward(model, x_bench, device, warmup=5, iters=20)
+                    print(f"Forward speed: {fwd_ms:.3f} ms/batch  |  throughput: {fwd_thr:.1f} samples/s")
+                else:
+                    fwd_ms, fwd_thr = float('nan'), float('nan')
+                    print("Forward speed: N/A (empty test loader)")
+
+                # Metrics
+                metrics = evaluate_model(model, test_loader, device, cfg["status_classes"])
+                print(f"Total loss (test): {metrics['avg_total_loss']:.4f}")
+                print(f"RUL MSE / RMSE   : {metrics['rul_mse']:.6f} / {metrics['rul_rmse']:.6f}")
+                for j, (acc, mp) in enumerate(zip(metrics["status_micro_acc"], metrics["status_macro_prec"])):
+                    print(f"status{j}: micro_acc={acc*100:.2f}%  macro_prec={mp*100:.2f}%  CE={metrics['status_ce'][j]:.4f}")
+
+                results.append({
+                    "name": f"{label}@{root.name}",
+                    "root": root.name,
+                    "params": total_params,
+                    "size_mb": size_mb,
+                    "fwd_ms": fwd_ms,
+                    "fwd_thr": fwd_thr,
+                    **metrics
+                })
+
+    # -------- Summary --------
     print("\n" + "="*90)
     print("SUMMARY (TEST) — lower loss/RMSE better; higher accuracy/precision/speed better")
     print("="*90)
@@ -448,30 +448,25 @@ def main():
         print("No models evaluated. (Missing checkpoints?)")
         return
 
-    # total loss
     print("\nTotal loss (asc):")
     for i, r in enumerate(sorted(results, key=lambda r: r["avg_total_loss"])):
         print(f"{i+1}. {r['name']} {r['avg_total_loss']:.4f}")
 
-    # RMSE
     print("\nRUL RMSE (asc):")
     for i, r in enumerate(sorted(results, key=lambda r: r["rul_rmse"])):
         print(f"{i+1}. {r['name']} {r['rul_rmse']:.6f}")
 
-    # per-head micro acc (desc)
     H = len(cfg["status_classes"])
     for j in range(H):
         print(f"\nstatus{j} micro accuracy (desc):")
         for i, r in enumerate(sorted(results, key=lambda r: r["status_micro_acc"][j], reverse=True)):
             print(f"{i+1}. {r['name']} {r['status_micro_acc'][j]*100:.2f}%")
 
-    # per-head macro precision (desc)
     for j in range(H):
         print(f"\nstatus{j} macro precision (desc):")
         for i, r in enumerate(sorted(results, key=lambda r: r["status_macro_prec"][j], reverse=True)):
             print(f"{i+1}. {r['name']} {r['status_macro_prec'][j]*100:.2f}%")
 
-    # Parameters and size
     print("\nParameter count (asc):")
     for i, r in enumerate(sorted(results, key=lambda r: r["params"])):
         print(f"{i+1}. {r['name']} {r['params']:,} params (~{r['size_mb']:.2f} MB)")
@@ -480,7 +475,6 @@ def main():
     for i, r in enumerate(sorted(results, key=lambda r: r["size_mb"])):
         print(f"{i+1}. {r['name']} ~{r['size_mb']:.2f} MB")
 
-    # Speed
     print("\nForward avg ms/batch (asc):")
     for i, r in enumerate(sorted(results, key=lambda r: (float('inf') if math.isnan(r['fwd_ms']) else r['fwd_ms']))):
         print(f"{i+1}. {r['name']} {r['fwd_ms']:.3f} ms")
@@ -488,6 +482,7 @@ def main():
     print("\nForward throughput (desc):")
     for i, r in enumerate(sorted(results, key=lambda r: (-1.0 if math.isnan(r['fwd_thr']) else r['fwd_thr']), reverse=True)):
         print(f"{i+1}. {r['name']} {r['fwd_thr']:.1f} samples/s")
+
 
 if __name__ == "__main__":
     main()
