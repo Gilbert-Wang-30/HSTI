@@ -4,32 +4,35 @@
 """
 Ablation training for ST-GCN (NO attention) on HSTI sensors.
 
-Trains three variants with *different K and actual partitions* (no zeroing):
-  1) self                    -> K=1
-  2) self + corr             -> K=2
-  3) self + causality(thr)   -> K=2  (ONE pooled PCMCI layer with threshold)
+Trains variants with *different K and actual partitions* (no zeroing):
+  1) self                                -> K=1
+  2) self + corr                         -> K=2
+  3) self + causality(thr)               -> K=2  (ONE pooled PCMCI layer with threshold)
+  4) self + corr + causality(thr)        -> K=3
 
 Causality layer is built from the 238x238 PCMCI matrix by:
     |C| -> avg_pool2d(14,14,stride=14) -> (17x17) -> >thr -> 1/0 -> diag=0
 
-Defaults mirror stgcn_train.py:
-- frequency partition is NOT used
-- same LR/scheduler/label smoothing etc.
-- logs to runs/stgcn_ablation_simple/<variant>_experiment/<timestamp>
-- saves to checkpoints/stgcn_ablation_simple/<variant>_best.pt
+Defaults mirror stgcn_train.py (no frequency partition). Uses same LR/scheduler/CE smoothing.
+
+Logs:
+  runs/stgcn_ablation/<variant>_experiment/<timestamp>
+
+Checkpoints:
+  checkpoints/stgcn_ablation/<variant>_best.pt
 
 Usage:
   python3 stgcn_ablation_train.py --device cuda
   python3 stgcn_ablation_train.py --causality-thresh 0.75 --epochs 2000 --device cuda
 
-Env override to try a different backbone (optional):
-  MODEL=stgcn python3 stgcn_ablation_train.py ...
+Backbone:
+  default MODEL=stgcn_no_attention
+  (optional) MODEL=stgcn python3 stgcn_ablation_train.py ...
 """
 
 import os
 import math
 import time
-import yaml
 import pickle
 import argparse
 from pathlib import Path
@@ -42,7 +45,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from datasets.stgcn_data_loader import STGCNDataset  # noqa: F401 (kept for parity)
-
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -81,9 +83,8 @@ def make_A_self(V: int) -> torch.Tensor:
     return torch.eye(V, dtype=torch.float32).unsqueeze(0)  # (1,V,V)
 
 def make_A_corr(V: int, corr_pkl_path: Path) -> torch.Tensor:
-    import pickle as _pkl
     with open(corr_pkl_path, "rb") as f:
-        co = _pkl.load(f)
+        co = pickle.load(f)
     A_corr = co if isinstance(co, torch.Tensor) else torch.tensor(co, dtype=torch.float32)
     if A_corr.shape != (V, V):
         raise ValueError(f"Correlation matrix {A_corr.shape} != ({V},{V})")
@@ -96,9 +97,8 @@ def make_A_causality(V: int, thresh: float) -> torch.Tensor:
     caus_pkl = BASE_DIR / "data" / "causality" / "pcmci_instant_adj_matrix_cycles_0_to_2204_lag0.pkl"
     if not caus_pkl.exists():
         raise FileNotFoundError(f"Missing PCMCI file: {caus_pkl}")
-    import pickle as _pkl
     with open(caus_pkl, "rb") as f:
-        C = _pkl.load(f)
+        C = pickle.load(f)
     C = C if isinstance(C, torch.Tensor) else torch.tensor(C, dtype=torch.float32)
     if C.shape != (V*14, V*14):
         raise ValueError(f"PCMCI matrix must be ({V*14},{V*14}); got {tuple(C.shape)}")
@@ -204,8 +204,7 @@ def evaluate(model, loader, device, status_classes, rul_weight, status_weight):
         for i,_ in enumerate(status_classes):
             ls = ls + ce_loss(out["status_logits"][i], status[:,i])
         loss = rul_weight*lr + status_weight*ls
-        total_loss += float(loss.item())
-        total_mse  += float(lr.item())
+        total_loss += float(loss.item()); total_mse += float(lr.item())
         for i,nc in enumerate(status_classes):
             prec_sums[i] += macro_precision_from_logits(out["status_logits"][i], status[:,i], nc)
         num_batches += 1
@@ -222,13 +221,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--epochs", type=int, default=5000)
+    ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--use-amp", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--causality-thresh", type=float, default=0.75)
+    ap.add_argument("--causality-thresh", type=float, default=0.5)
 
     # data paths like stgcn_train.py
     ap.add_argument("--train-pkl", type=str, default=str(BASE_DIR / "data" / "processed" / "train_stgcn.pkl"))
@@ -278,15 +277,21 @@ def main():
     V = 17
     corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
 
-    # Prepare the three A variants
-    A_self   = make_A_self(V)                                 # K=1
-    A_corr   = torch.cat([make_A_self(V), make_A_corr(V, corr_pkl)], dim=0)  # K=2
-    A_caus   = torch.cat([make_A_self(V), make_A_causality(V, args.causality_thresh)], dim=0)  # K=2
+    # Prepare A variants
+    A_self_only   = make_A_self(V)                                   # K=1
+    A_corr_only   = make_A_corr(V, corr_pkl)                          # (1,V,V)
+    A_caus_only   = make_A_causality(V, args.causality_thresh)        # (1,V,V)
+
+    A_self        = A_self_only                                       # K=1
+    A_self_corr   = torch.cat([A_self_only, A_corr_only], dim=0)      # K=2
+    A_self_caus   = torch.cat([A_self_only, A_caus_only], dim=0)      # K=2
+    A_self_corr_caus = torch.cat([A_self_only, A_corr_only, A_caus_only], dim=0)  # K=3
 
     variants = [
-        ("self",          A_self, "self_best.pt"),
-        ("self_corr",     A_corr, "self_corr_best.pt"),
-        (f"self_caus_{args.causality_thresh}", A_caus, f"self_caus_{args.causality_thresh}_best.pt"),
+        ("self",                A_self,            "self_best.pt"),
+        ("self_corr",           A_self_corr,       "self_corr_best.pt"),
+        (f"self_caus_{args.causality_thresh}",  A_self_caus,  f"self_caus_{args.causality_thresh}_best.pt"),
+        (f"self_corr_caus_{args.causality_thresh}", A_self_corr_caus, f"self_corr_caus_{args.causality_thresh}_best.pt"),
     ]
 
     results = []
@@ -294,12 +299,29 @@ def main():
         # logging dirs
         run_id   = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_dir  = Path(args.run_root) / f"{tag}_experiment" / run_id
-        ckpt_dir = Path(args.ckpt_dir);    log_dir.mkdir(parents=True, exist_ok=True); ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_dir = Path(args.ckpt_dir); log_dir.mkdir(parents=True, exist_ok=True); ckpt_dir.mkdir(parents=True, exist_ok=True)
         writer   = SummaryWriter(log_dir=str(log_dir))
         print(f"\n===== Training variant: {tag} (K={A.size(0)}) =====")
-        # pretty print adjacency
-        names = ["A_self"] if A.size(0)==1 else (["A_self","A_corr"] if tag.startswith("self_corr") else ["A_self",f"A_caus(thr>{args.causality_thresh})"])
-        print_adj_binary(A, names, sep="")
+
+        # pretty print adjacency and causality confirmation
+        if A.size(0) == 1:
+            names = ["A_self"]
+            print_adj_binary(A, names, sep="")
+        elif "caus" in tag and A.size(0) == 2:
+            names = ["A_self", f"A_caus(thr>{args.causality_thresh})"]
+            print_adj_binary(A, names, sep="")
+            # explicit causality confirmation
+            caus = A[-1]
+            nnz = int(caus.count_nonzero().item())
+            print(f"[CHECK] A_caus nnz={nnz}")
+        elif "corr_caus" in tag and A.size(0) == 3:
+            names = ["A_self", "A_corr", f"A_caus(thr>{args.causality_thresh})"]
+            print_adj_binary(A, names, sep="")
+            caus = A[-1]; nnz = int(caus.count_nonzero().item())
+            print(f"[CHECK] A_caus nnz={nnz}")
+        else:
+            names = ["A_self","A_corr"] if A.size(0)==2 else [f"A[{k}]" for k in range(A.size(0))]
+            print_adj_binary(A, names, sep="")
 
         # build model
         model = build_model(model_name, cfg, device, A=A.to(device))
@@ -352,9 +374,9 @@ def main():
         writer.flush(); writer.close()
         results.append((tag, best_val))
 
-    print("\n=== Simple ablation summary (lower val loss is better) ===")
+    print("\n=== Ablation summary (lower val loss is better) ===")
     for tag, val in sorted(results, key=lambda x: x[1]):
-        print(f"{tag:>18s}: best_val_loss = {val:.6f}")
+        print(f"{tag:>22s}: best_val_loss = {val:.6f}")
 
 if __name__ == "__main__":
     main()
