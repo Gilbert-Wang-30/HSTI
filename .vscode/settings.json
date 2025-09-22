@@ -1,10 +1,11 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.pythonProjects": [
         {
             "path": "runs/dcrnn_with_causality_experiment/20250821_173156",
             "envManager": "ms-python.python:system",
             "packageManager": "ms-python.python:pip"
         }
-    ]
+    ],
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

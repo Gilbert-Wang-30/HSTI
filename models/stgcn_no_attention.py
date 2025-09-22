@@ -44,19 +44,17 @@ def normalize_adjacency(A: torch.Tensor) -> torch.Tensor:
     Returns:
         A_norm: (K, V, V) normalized adjacency
     """
-    assert A.dim() == 3, "A must be (K, V, V)"
-    K, V, V2 = A.shape
-    assert V == V2, "Adjacency must be square per partition"
+    assert A.dim() == 3 and A.shape[1] == A.shape[2]
+    K, V, _ = A.shape
+    A = A.clone()
+    eps = 1e-8  # Small epsilon to avoid division by zero
 
-    A_norm = torch.empty_like(A)
+    A_sum = A.sum(dim=0)                 # (V, V)
+    deg = A_sum.sum(dim=1).clamp_min(eps)  # (V,)
+    D_inv_sqrt = torch.diag(deg.pow(-0.5))
     for k in range(K):
-        Ak = A[k]                              # (V, V)
-        deg = Ak.sum(dim=1)                    # (V,) degree per node (row sum)
-        deg = torch.clamp(deg, min=1e-6)       # avoid divide-by-zero
-        D_inv_sqrt = torch.diag(torch.pow(deg, -0.5))  # (V, V)
-        A_norm[k] = D_inv_sqrt @ Ak @ D_inv_sqrt
-    return A_norm
-
+        A[k] = D_inv_sqrt @ A[k] @ D_inv_sqrt
+    return A
 
 # --------------------------------------------------------------------------------------
 # Core layers

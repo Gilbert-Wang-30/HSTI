@@ -2,7 +2,7 @@
 model: stgcn_no_attention
 # core training
 epochs: 5000
-batch_size: 64
+batch_size: 256
 lr: 3e-4
 weight_decay: 1e-4
 grad_clip: 1.0
