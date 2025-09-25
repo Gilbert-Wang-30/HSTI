@@ -25,6 +25,8 @@ Usage:
   python3 stgcn_ablation_train.py --device cuda
   python3 stgcn_ablation_train.py --causality-thresh 0.75 --epochs 2000 --device cuda
 
+  mkdir -p log && logfile="log/$(date +'%F_%H-%M-%S').txt" && stdbuf -oL -eL python3 stgcn_ablation_train.py --causality-thresh 0.75 --epochs 2000 --device cuda |& tee -a "$logfile"
+
 Backbone:
   default MODEL=stgcn_no_attention
   (optional) MODEL=stgcn python3 stgcn_ablation_train.py ...
@@ -277,15 +279,18 @@ def main():
     V = 17
     corr_pkl = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
 
-    # Prepare A variants
-    A_self_only   = make_A_self(V)                                   # K=1
-    A_corr_only   = make_A_corr(V, corr_pkl)                          # (1,V,V)
-    A_caus_only   = make_A_causality(V, args.causality_thresh)        # (1,V,V)
+    # Prepare A variants — always K=3 for fair comparison
+    A_self_only    = make_A_self(V)                                    # (1,V,V)
+    A_corr_only    = make_A_corr(V, corr_pkl)                          # (1,V,V)
+    A_caus_only    = make_A_causality(V, args.causality_thresh)        # (1,V,V)
 
-    A_self        = A_self_only                                       # K=1
-    A_self_corr   = torch.cat([A_self_only, A_corr_only], dim=0)      # K=2
-    A_self_caus   = torch.cat([A_self_only, A_caus_only], dim=0)      # K=2
-    A_self_corr_caus = torch.cat([A_self_only, A_corr_only, A_caus_only], dim=0)  # K=3
+    Z              = torch.zeros(1, V, V, dtype=A_self_only.dtype)     # (1,V,V), null partition
+
+    # Always stack as [A_self, A_corr, A_caus] in this fixed order
+    A_self             = torch.cat([A_self_only, Z,            Z           ], dim=0)  # K=3: self only
+    A_self_corr        = torch.cat([A_self_only, A_corr_only,  Z           ], dim=0)  # K=3: self + corr
+    A_self_caus        = torch.cat([A_self_only, Z,            A_caus_only ], dim=0)  # K=3: self + caus
+    A_self_corr_caus   = torch.cat([A_self_only, A_corr_only,  A_caus_only ], dim=0)  # K=3: self + corr + caus
 
     variants = [
         ("self",                A_self,            "self_best.pt"),
@@ -304,24 +309,33 @@ def main():
         print(f"\n===== Training variant: {tag} (K={A.size(0)}) =====")
 
         # pretty print adjacency and causality confirmation
-        if A.size(0) == 1:
-            names = ["A_self"]
-            print_adj_binary(A, names, sep="")
-        elif "caus" in tag and A.size(0) == 2:
-            names = ["A_self", f"A_caus(thr>{args.causality_thresh})"]
-            print_adj_binary(A, names, sep="")
-            # explicit causality confirmation
-            caus = A[-1]
-            nnz = int(caus.count_nonzero().item())
-            print(f"[CHECK] A_caus nnz={nnz}")
-        elif "corr_caus" in tag and A.size(0) == 3:
-            names = ["A_self", "A_corr", f"A_caus(thr>{args.causality_thresh})"]
-            print_adj_binary(A, names, sep="")
-            caus = A[-1]; nnz = int(caus.count_nonzero().item())
-            print(f"[CHECK] A_caus nnz={nnz}")
-        else:
-            names = ["A_self","A_corr"] if A.size(0)==2 else [f"A[{k}]" for k in range(A.size(0))]
-            print_adj_binary(A, names, sep="")
+        # if A.size(0) == 1:
+        #     names = ["A_self"]
+        #     print_adj_binary(A, names, sep="")
+        # elif "caus" in tag and A.size(0) == 2:
+        #     names = ["A_self", f"A_caus(thr>{args.causality_thresh})"]
+        #     print_adj_binary(A, names, sep="")
+        #     # explicit causality confirmation
+        #     caus = A[-1]
+        #     nnz = int(caus.count_nonzero().item())
+        #     print(f"[CHECK] A_caus nnz={nnz}")
+        # elif "corr_caus" in tag and A.size(0) == 3:
+        #     names = ["A_self", "A_corr", f"A_caus(thr>{args.causality_thresh})"]
+        #     print_adj_binary(A, names, sep="")
+        #     caus = A[-1]; nnz = int(caus.count_nonzero().item())
+        #     print(f"[CHECK] A_caus nnz={nnz}")
+        # else:
+        #     names = ["A_self","A_corr"] if A.size(0)==2 else [f"A[{k}]" for k in range(A.size(0))]
+        #     print_adj_binary(A, names, sep="")
+        # pretty print adjacency and causality confirmation
+        names = ["A_self", "A_corr", f"A_caus(thr>{args.causality_thresh})"]
+        print_adj_binary(A, names, sep="")
+
+        # explicit causality confirmation
+        caus = A[2]
+        nnz  = int(caus.count_nonzero().item())
+        print(f"[CHECK] A_caus nnz={nnz}")
+
 
         # build model
         model = build_model(model_name, cfg, device, A=A.to(device))

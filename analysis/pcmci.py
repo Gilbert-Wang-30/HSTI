@@ -5,6 +5,9 @@ PCMCI causal discovery on high-level features (cycles 0-209).
 This script extracts features and runs the PCMCI algorithm to find causal links.
 Default parameters: time lag = 1, significance level = 0.01.
 To adjust, modify the MAX_LAG and SIGNIFICANCE_LEVEL variables below.
+
+
+ Sample usage: python3 analysis/pcmci.py --start 0 --end 2204 --lag 0 
 """
 
 # Necessary imports
