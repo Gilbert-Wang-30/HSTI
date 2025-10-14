@@ -1,0 +1,253 @@
+(HSTI) gilbert@gws:~/code/HSTI$ python3 LSTM_correlation_fix.py --sensor TS1 --device cuda
+python3 LSTM_correlation_fix.py --sensor TS2 --device cuda
+python3 LSTM_correlation_fix.py --sensor TS3 --device cuda
+python3 LSTM_correlation_fix.py --sensor TS4 --device cuda
+[INFO] Target sensor: TS1  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS2', 'TS3', 'TS4']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.140785
+[PASS 1] E_TS2: 0.084690
+[PASS 1] E_TS3: 0.067799
+[PASS 1] E_TS4: 0.018120
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS2] = 1.662357
+  alpha[TS3] = 2.076520
+  alpha[TS4] = 4.000000
+[FILTER] Using 1/3 sensors after quality screening: ['TS2']
+[PASS 2] Evaluating correction with learned α_c and A_caus weights...
+
+=== Correlation Fix Summary (learned α_c, filtered partners) ===
+Target sensor: TS1  freq=1hz  L=10
+Correlated sensors used: ['TS2']
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.046152
+Average MSE (after fix) : 0.031114
+Relative improvement     : +32.5841%
+
+Top correlation weights β_c (k->s) and α_c scales:
+   TS2: beta=0.4337  alpha=1.6624
+[INFO] Target sensor: TS2  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS1', 'TS3', 'TS4']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.084690
+[PASS 1] E_TS1: 0.140785
+[PASS 1] E_TS3: 0.067799
+[PASS 1] E_TS4: 0.018120
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS1] = 0.601555
+  alpha[TS3] = 1.249142
+  alpha[TS4] = 4.000000
+[FILTER] Using 1/3 sensors after quality screening: ['TS1']
+[PASS 2] Evaluating correction with learned α_c and A_caus weights...
+
+=== Correlation Fix Summary (learned α_c, filtered partners) ===
+Target sensor: TS2  freq=1hz  L=10
+Correlated sensors used: ['TS1']
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.017886
+Average MSE (after fix) : 0.011259
+Relative improvement     : +37.0528%
+
+Top correlation weights β_c (k->s) and α_c scales:
+   TS1: beta=0.4337  alpha=0.6016
+[INFO] Target sensor: TS3  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS1', 'TS2', 'TS4']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.067799
+[PASS 1] E_TS1: 0.140785
+[PASS 1] E_TS2: 0.084690
+[PASS 1] E_TS4: 0.018120
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS1] = 0.481575
+  alpha[TS2] = 0.800549
+  alpha[TS4] = 3.741682
+[FILTER] Using 0/3 sensors after quality screening: []
+[INFO] All candidates filtered out; keeping pure LSTM.
+[INFO] Target sensor: TS4  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS1', 'TS2', 'TS3']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.018120
+[PASS 1] E_TS1: 0.140785
+[PASS 1] E_TS2: 0.084690
+[PASS 1] E_TS3: 0.067799
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS1] = 0.128705
+  alpha[TS2] = 0.213954
+  alpha[TS3] = 0.267259
+[FILTER] Using 0/3 sensors after quality screening: []
+[INFO] All candidates filtered out; keeping pure LSTM.
+
+python3 LSTM_correlation_fix.py --sensor PS5 --device cuda
+python3 LSTM_correlation_fix.py --sensor PS6 --device cuda
+python3 LSTM_correlation_fix.py --sensor VS1 --device cuda
+python3 LSTM_correlation_fix.py --sensor CP --device cuda
+
+[INFO] Target sensor: PS5  freq=100hz  L=1000
+[INFO] Same-frequency correlated sensors (1): ['PS6']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.010248
+[PASS 1] E_PS6: 0.010471
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[PS6] = 0.978687
+[FILTER] Using 1/1 sensors after quality screening: ['PS6']
+[PASS 2] Evaluating correction with learned α_c and A_caus weights...
+
+=== Correlation Fix Summary (learned α_c, filtered partners) ===
+Target sensor: PS5  freq=100hz  L=1000
+Correlated sensors used: ['PS6']
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.000271
+Average MSE (after fix) : 0.000053
+Relative improvement     : +80.5094%
+
+Top correlation weights β_c (k->s) and α_c scales:
+   PS6: beta=0.5102  alpha=0.9787
+[INFO] Target sensor: PS6  freq=100hz  L=1000
+[INFO] Same-frequency correlated sensors (1): ['PS5']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.010471
+[PASS 1] E_PS5: 0.010248
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[PS5] = 1.021776
+[FILTER] Using 1/1 sensors after quality screening: ['PS5']
+[PASS 2] Evaluating correction with learned α_c and A_caus weights...
+
+=== Correlation Fix Summary (learned α_c, filtered partners) ===
+Target sensor: PS6  freq=100hz  L=1000
+Correlated sensors used: ['PS5']
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.000279
+Average MSE (after fix) : 0.000055
+Relative improvement     : +80.2212%
+
+Top correlation weights β_c (k->s) and α_c scales:
+   PS5: beta=0.5102  alpha=1.0218
+[INFO] Target sensor: VS1  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (1): ['CP']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.018324
+[PASS 1] E_CP: 0.015264
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[CP] = 1.200443
+[FILTER] Using 0/1 sensors after quality screening: []
+[INFO] All candidates filtered out; keeping pure LSTM.
+[INFO] Target sensor: CP  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (1): ['VS1']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.015264
+[PASS 1] E_VS1: 0.018324
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[VS1] = 0.833025
+[FILTER] Using 0/1 sensors after quality screening: []
+[INFO] All candidates filtered out; keeping pure LSTM.
+
+
+
+
+python3 LSTM_correlation_fix.py --sensor TS3 --device cuda
+python3 LSTM_correlation_fix.py --sensor TS4 --device cuda
+python3 LSTM_correlation_fix.py --sensor VS1 --device cuda
+python3 LSTM_correlation_fix.py --sensor CP --device cuda
+[INFO] Target sensor: TS3  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS1', 'TS2', 'TS4']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.067799
+[PASS 1] E_TS1: 0.140785
+[PASS 1] E_TS2: 0.084690
+[PASS 1] E_TS4: 0.018120
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS1] = 0.481575
+  alpha[TS2] = 0.800549
+  alpha[TS4] = 3.741682
+[FILTER] Using 0/3 sensors after quality screening: []
+[INFO] All candidates filtered out; reporting baseline only.
+
+=== Correlation Fix Summary (baseline only; no partners kept) ===
+Target sensor: TS3  freq=1hz  L=10
+Correlated sensors used: []
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.007741
+Average MSE (after fix) : 0.007741
+Relative improvement     : +0.0000%
+
+[INFO] Target sensor: TS4  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (3): ['TS1', 'TS2', 'TS3']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.018120
+[PASS 1] E_TS1: 0.140785
+[PASS 1] E_TS2: 0.084690
+[PASS 1] E_TS3: 0.067799
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[TS1] = 0.128705
+  alpha[TS2] = 0.213954
+  alpha[TS3] = 0.267259
+[FILTER] Using 0/3 sensors after quality screening: []
+[INFO] All candidates filtered out; reporting baseline only.
+
+=== Correlation Fix Summary (baseline only; no partners kept) ===
+Target sensor: TS4  freq=1hz  L=10
+Correlated sensors used: []
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.003356
+Average MSE (after fix) : 0.003356
+Relative improvement     : +0.0000%
+
+[INFO] Target sensor: VS1  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (1): ['CP']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.018324
+[PASS 1] E_CP: 0.015264
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[CP] = 1.200443
+[FILTER] Using 0/1 sensors after quality screening: []
+[INFO] All candidates filtered out; reporting baseline only.
+
+=== Correlation Fix Summary (baseline only; no partners kept) ===
+Target sensor: VS1  freq=1hz  L=10
+Correlated sensors used: []
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.002815
+Average MSE (after fix) : 0.002815
+Relative improvement     : +0.0000%
+
+[INFO] Target sensor: CP  freq=1hz  L=10
+[INFO] Same-frequency correlated sensors (1): ['VS1']
+[PASS 1] Computing per-sensor sensitivities (robust residual medians)...
+/home/gilbert/miniconda3/envs/HSTI/lib/python3.9/site-packages/torch/nn/modules/linear.py:125: UserWarning: Attempting to use hipBLASLt on an unsupported architecture! Overriding blas backend to hipblas (Triggered internally at ../aten/src/ATen/Context.cpp:296.)
+  return F.linear(input, self.weight, self.bias)
+[PASS 1] E_s (target): 0.015264
+[PASS 1] E_VS1: 0.018324
+[PASS 1] α_c (clipped) per correlated sensor:
+  alpha[VS1] = 0.833025
+[FILTER] Using 0/1 sensors after quality screening: []
+[INFO] All candidates filtered out; reporting baseline only.
+
+=== Correlation Fix Summary (baseline only; no partners kept) ===
+Target sensor: CP  freq=1hz  L=10
+Correlated sensors used: []
+Windows processed: 13229
+Average MSE (pure LSTM) : 0.000619
+Average MSE (after fix) : 0.000619
+Relative improvement     : +0.0000%

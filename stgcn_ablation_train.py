@@ -91,7 +91,7 @@ def make_A_corr(V: int, corr_pkl_path: Path) -> torch.Tensor:
     if A_corr.shape != (V, V):
         raise ValueError(f"Correlation matrix {A_corr.shape} != ({V},{V})")
     A_corr = 0.5 * (A_corr + A_corr.t())
-    A_corr.fill_diagonal_(0.0)
+    # A_corr.fill_diagonal_(0.0)
     return A_corr.unsqueeze(0)  # (1,V,V)
 
 def make_A_causality(V: int, thresh: float) -> torch.Tensor:
@@ -107,7 +107,7 @@ def make_A_causality(V: int, thresh: float) -> torch.Tensor:
     C_abs = C.abs().unsqueeze(0).unsqueeze(0)
     A_caus = F.avg_pool2d(C_abs, kernel_size=(14,14), stride=(14,14)).squeeze(0).squeeze(0)  # (17,17)
     A_caus = (A_caus > float(thresh)).to(torch.float32)
-    A_caus.fill_diagonal_(0.0)
+    # A_caus.fill_diagonal_(0.0)
     return A_caus.unsqueeze(0)  # (1,V,V)
 
 # -----------------------

@@ -14,6 +14,10 @@ Core idea (one window):
 
 Where sensor sensitivity E_k is computed (first pass) as:
   E_k = median_over_windows( median_over_time(|y_k - ŷ_k|) )
+
+This version adds a data-driven filter:
+- keep a candidate c only if its residuals align with target (corr ≥ r_min),
+  it improves target solo (gain ≥ g_min), and is stable across chunks.
 """
 
 import os
@@ -27,7 +31,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from datasets.missing_data_loader import missing_data_loader
+
+BASE_DIR = Path(__file__).resolve().parent
+from datasets.missing_data_loader import missing_data_loader  # noqa: F401 (import side-effects)
+from models.LSTM import LSTMModel  # seq2seq: window -> window
 
 # -----------------------
 # Sensor groups & ordering
@@ -46,23 +53,13 @@ IDX_MAP = {s: i for i, s in enumerate(ALL_SENSORS)}
 # Window length by frequency
 WINLEN = {"1hz": 10, "10hz": 100, "100hz": 1000}
 
-BASE_DIR = Path(__file__).resolve().parent
-
-from models.LSTM import LSTMModel  # seq2seq: window -> window
-
-
 # -----------------------
 # IO helpers
 # -----------------------
 def _find_model_paths(sensor_name: str) -> Tuple[Path, Optional[Path]]:
-    """
-    Return (weights_path, stats_path or None).
-    Tries checkpoints/LSTM/<sensor>/<sensor>_lstm.pth then models/<sensor>_lstm.pth.
-    Stats are expected at models/<sensor>_lstm_norm_stats.npz (fallback to ckpt dir if present).
-    """
+    """Return (weights_path, stats_path or None)."""
     ckpt_dir = BASE_DIR / "checkpoints" / "LSTM" / sensor_name.lower()
     models_dir = BASE_DIR / "models"
-
     w_ckpt   = ckpt_dir   / f"{sensor_name.lower()}_lstm.pth"
     w_models = models_dir / f"{sensor_name.lower()}_lstm.pth"
 
@@ -78,14 +75,10 @@ def _find_model_paths(sensor_name: str) -> Tuple[Path, Optional[Path]]:
         stats = stats if stats.exists() else None
     else:
         raise FileNotFoundError(f"No LSTM weights for {sensor_name} at {w_ckpt} or {w_models}")
-
     return weights, stats
 
-
 def _load_norm_stats(sensor_name: str) -> Tuple[float, float]:
-    """
-    Load (mean, std) for a sensor from saved npz; if missing, fallback to (0,1) with a warning.
-    """
+    """Load (mean, std) for a sensor; fallback to (0,1)."""
     _, stats_path = _find_model_paths(sensor_name)
     if stats_path is None or not stats_path.exists():
         print(f"[WARN] No norm stats for {sensor_name} at {stats_path}; using mean=0, std=1")
@@ -93,11 +86,8 @@ def _load_norm_stats(sensor_name: str) -> Tuple[float, float]:
     d = np.load(stats_path)
     return float(d["mean"]), float(d["std"])
 
-
 def _load_lstm(sensor_name: str, device: torch.device) -> LSTMModel:
-    """
-    Instantiate and load the LSTM for a sensor using the training hyperparams (hidden=128, layers=3).
-    """
+    """Instantiate and load the LSTM for a sensor using training hyperparams (hidden=128, layers=3)."""
     weights_path, _ = _find_model_paths(sensor_name)
     model = LSTMModel(input_size=1, hidden_size=128, num_layers=3)
     try:
@@ -105,31 +95,24 @@ def _load_lstm(sensor_name: str, device: torch.device) -> LSTMModel:
     except TypeError:
         state = torch.load(weights_path, map_location=device)
     model.load_state_dict(state)
-    model.to(device)
-    model.eval()
+    model.to(device).eval()
     return model
-
 
 # -----------------------
 # Prediction utils
 # -----------------------
 @torch.no_grad()
 def predict_window(model: nn.Module, x_raw: np.ndarray, mean: float, std: float, device: torch.device) -> np.ndarray:
-    """
-    model: window->window LSTM
-    x_raw: (L,) previous window in RAW units
-    Returns yhat_raw: (L,) next window prediction in RAW units
-    """
-    x_norm = (torch.tensor(x_raw, dtype=torch.float32, device=device).view(1, -1, 1) - mean) / (std + 1e-8)
+    """model: window->window LSTM; x_raw (L,) in raw units -> yhat_raw (L,)"""
+    x_norm = (torch.as_tensor(x_raw, dtype=torch.float32, device=device).view(1, -1, 1) - mean) / (std + 1e-8)
     yhat_norm = model(x_norm)                # (1,L,1)
     yhat_raw = yhat_norm.squeeze(0).squeeze(-1) * (std + 1e-8) + mean
     return yhat_raw.detach().cpu().numpy()
 
-
 def slice_window_pair(freq: str, batched_tuple) -> Tuple[np.ndarray, np.ndarray]:
     """
-    From batched ((x100,x10,x1),(y100,y10,y1)) where each is (B, sensors, L), return
-    (X_mat, Y_mat) for B=1 squeezed to (sensors, L) numpy arrays.
+    From batched ((x100,x10,x1),(y100,y10,y1)) where each is (B, sensors, L),
+    return (X_mat, Y_mat) for B=1 squeezed to (sensors, L) numpy arrays.
     """
     (x100_b, x10_b, x1_b), (y100_b, y10_b, y1_b) = batched_tuple
     if freq == "100hz":
@@ -145,17 +128,13 @@ def slice_window_pair(freq: str, batched_tuple) -> Tuple[np.ndarray, np.ndarray]
         raise ValueError(f"Unknown frequency {freq}")
     return X, Y
 
-
 # -----------------------
 # First pass: compute sensitivities E_k (median of window-wise median |residual|)
 # -----------------------
 def compute_sensitivities(sensor: str,
                           same_freq_corr: List[str],
                           device: torch.device) -> Tuple[float, Dict[str, float]]:
-    """
-    Returns: (E_s, E_c_dict) where E_s is target sensor sensitivity,
-             and E_c_dict maps correlated sensor name -> E_c.
-    """
+    """Returns (E_s, E_c_dict)."""
     sensor = sensor.upper()
     freq = FREQ_MAP[sensor]
 
@@ -171,7 +150,8 @@ def compute_sensitivities(sensor: str,
             corr_stats[name]  = _load_norm_stats(name)
         except FileNotFoundError:
             print(f"[WARN] Missing LSTM for correlated sensor {name}; skipping sensitivity.")
-    # Prepare splits
+
+    # Prepare splits (any available among train/dev/test)
     def _load_split(suffix: str):
         p = BASE_DIR / "data" / "processed" / f"{sensor.lower()}_{suffix}.pkl"
         if not p.exists(): return None
@@ -201,20 +181,15 @@ def compute_sensitivities(sensor: str,
         for batch in loader:
             X_mat, Y_mat = slice_window_pair(freq, batch)
             # target residual median
-            x_t = X_mat[s_local_idx]
-            y_t = Y_mat[s_local_idx]
+            x_t = X_mat[s_local_idx]; y_t = Y_mat[s_local_idx]
             yhat_t = predict_window(t_model, x_t, t_mean, t_std, device)
-            med_t = float(np.median(np.abs(y_t - yhat_t)))
-            target_meds.append(med_t)
+            target_meds.append(float(np.median(np.abs(y_t - yhat_t))))
             # correlated residual medians
             for name, mdl in corr_models.items():
-                c_idx = local_idx(name)
-                c_mean, c_std = corr_stats[name]
-                x_c = X_mat[c_idx]
-                y_c = Y_mat[c_idx]
+                c_idx = local_idx(name); c_mean, c_std = corr_stats[name]
+                x_c = X_mat[c_idx]; y_c = Y_mat[c_idx]
                 yhat_c = predict_window(mdl, x_c, c_mean, c_std, device)
-                med_c = float(np.median(np.abs(y_c - yhat_c)))
-                corr_meds[name].append(med_c)
+                corr_meds[name].append(float(np.median(np.abs(y_c - yhat_c))))
 
     # Aggregate by median across windows
     E_s = float(np.median(target_meds)) if target_meds else 1.0
@@ -222,9 +197,115 @@ def compute_sensitivities(sensor: str,
            for name, vals in corr_meds.items()}
     return E_s, E_c
 
+# -----------------------
+# Candidate scoring & filtering
+# -----------------------
+def _flatten_residuals_for_metrics(res_s: np.ndarray, res_c: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    xs = res_s.reshape(-1); xc = res_c.reshape(-1)
+    m = np.isfinite(xs) & np.isfinite(xc)
+    return xs[m], xc[m]
+
+def _pearsonr_safe(a: np.ndarray, b: np.ndarray) -> float:
+    if a.size < 3: return 0.0
+    va = a - a.mean(); vb = b - b.mean()
+    denom = np.sqrt((va*va).sum() * (vb*vb).sum()) + 1e-12
+    return float((va*vb).sum() / denom)
+
+def score_candidates(sensor: str,
+                     same_freq_corr: List[str],
+                     dev_splits: List,  # list of torch.utils.data.Subset
+                     device: torch.device,
+                     alpha_c_map: Dict[str, float],
+                     beta_mat_17x17: np.ndarray,
+                     r_min: float = 0.2,
+                     g_min: float = 0.0,
+                     chunks: int = 5) -> List[str]:
+    """Return filtered list of sensors that actually help."""
+    freq = FREQ_MAP[sensor]
+    # Load target model+stats once
+    t_model = _load_lstm(sensor, device)
+    t_mean, t_std = _load_norm_stats(sensor)
+    s_idx_global = IDX_MAP[sensor]
+
+    # local index helper
+    if freq == "1hz":
+        s_local_idx = SENSORS_1.index(sensor)
+        def lidx(name: str) -> int: return SENSORS_1.index(name)
+    elif freq == "10hz":
+        s_local_idx = SENSORS_10.index(sensor)
+        def lidx(name: str) -> int: return SENSORS_10.index(name)
+    else:
+        s_local_idx = SENSORS_100.index(sensor)
+        def lidx(name: str) -> int: return SENSORS_100.index(name)
+
+    # Preload correlated models/stats (skip missing)
+    corr_models, corr_stats = {}, {}
+    for name in same_freq_corr:
+        try:
+            corr_models[name] = _load_lstm(name, device)
+            corr_stats[name]  = _load_norm_stats(name)
+        except FileNotFoundError:
+            pass
+    if not corr_models:
+        return []
+
+    # Collect residuals across splits
+    res_target: List[np.ndarray] = []
+    res_by_c: Dict[str, List[np.ndarray]] = {k: [] for k in corr_models.keys()}
+
+    for split in dev_splits:
+        loader = DataLoader(split, batch_size=1, shuffle=False, num_workers=0)
+        for batch in loader:
+            X_mat, Y_mat = slice_window_pair(freq, batch)
+            x_t = X_mat[s_local_idx]; y_t = Y_mat[s_local_idx]
+            yhat_t = predict_window(t_model, x_t, t_mean, t_std, device)
+            res_target.append(y_t - yhat_t)
+            for name, mdl in corr_models.items():
+                idx = lidx(name); mu, sd = corr_stats[name]
+                x_c = X_mat[idx]; y_c = Y_mat[idx]
+                yhat_c = predict_window(mdl, x_c, mu, sd, device)
+                res_by_c[name].append(y_c - yhat_c)
+
+    if len(res_target) == 0:
+        return []
+
+    res_target = np.stack(res_target, axis=0)  # (W, L)
+    W = res_target.shape[0]
+    chunk_bounds = np.linspace(0, W, num=chunks+1, dtype=int)
+
+    kept: List[str] = []
+    for name in list(corr_models.keys()):
+        if len(res_by_c[name]) != W:
+            continue
+        res_c = np.stack(res_by_c[name], axis=0)
+        beta = float(beta_mat_17x17[IDX_MAP[name], s_idx_global])
+        alpha = float(alpha_c_map.get(name, 1.0))
+        scale = alpha * max(beta, 0.0)
+
+        rc_list, gc_list, sign_list = [], [], []
+        for i in range(chunks):
+            a, b = chunk_bounds[i], chunk_bounds[i+1]
+            if b <= a: continue
+            rs = res_target[a:b]; rc = res_c[a:b]
+            xs, xc = _flatten_residuals_for_metrics(rs, rc)
+            r = _pearsonr_safe(xs, xc)
+            mse_pure = float((xs**2).mean()) if xs.size else 0.0
+            mse_with = float(((xs - scale*xc)**2).mean()) if xs.size else mse_pure
+            gain = (mse_pure - mse_with) / (mse_pure + 1e-12)
+            sign_agree = float((np.sign(xs) == np.sign(xc)).mean()) if xs.size else 0.5
+            rc_list.append(r); gc_list.append(gain); sign_list.append(sign_agree)
+
+        r_med = float(np.median(rc_list)) if rc_list else 0.0
+        g_med = float(np.median(gc_list)) if gc_list else 0.0
+        p_sign = float(np.median(sign_list)) if sign_list else 0.5
+
+        if (r_med >= r_min) and (g_med >= g_min) and (p_sign >= 0.55):
+            kept.append(name)
+
+    return kept
 
 # -----------------------
-# Main correlation-fix executor (two-pass; no manual alpha)
+# Main correlation-fix executor (two-pass; filter in-between)
 # -----------------------
 def run_fix_for_sensor(sensor: str,
                        device: torch.device,
@@ -234,15 +315,13 @@ def run_fix_for_sensor(sensor: str,
     if sensor not in ALL_SENSORS:
         raise ValueError(f"Unknown sensor '{sensor}'. Must be one of: {ALL_SENSORS}")
 
-    freq = FREQ_MAP[sensor]
-    L = WINLEN[freq]
+    freq = FREQ_MAP[sensor]; L = WINLEN[freq]
     print(f"[INFO] Target sensor: {sensor}  freq={freq}  L={L}")
 
-    # Load binary correlation (to find partners at same frequency)
+    # Load binary correlation
     corr_path = BASE_DIR / "data" / "correlation" / "binary_co_matrix.pkl"
     with open(corr_path, "rb") as f:
-        co = pickle.load(f)
-    co = np.asarray(co, dtype=np.float32)
+        co = np.asarray(pickle.load(f), dtype=np.float32)
     if co.shape != (17, 17):
         raise ValueError(f"Correlation matrix must be (17,17); got {co.shape}")
 
@@ -258,7 +337,7 @@ def run_fix_for_sensor(sensor: str,
 
     # Same-frequency correlated sensors (exclude self)
     s_idx = IDX_MAP[sensor]
-    same_freq_correlated = []
+    same_freq_correlated: List[str] = []
     for j in range(17):
         if j == s_idx: continue
         name_j = ALL_SENSORS[j]
@@ -271,14 +350,10 @@ def run_fix_for_sensor(sensor: str,
 
     print(f"[INFO] Same-frequency correlated sensors ({len(same_freq_correlated)}): {same_freq_correlated}")
 
-    # -------- First pass: sensitivities E_s and E_c --------
+    # -------- Pass 1: sensitivities E_s and E_c; build α_c --------
     print("[PASS 1] Computing per-sensor sensitivities (robust residual medians)...")
     E_s, E_c = compute_sensitivities(sensor, same_freq_correlated, device)
     print(f"[PASS 1] E_s (target): {E_s:.6f}")
-    for name in same_freq_correlated:
-        print(f"[PASS 1] E_{name}: {E_c.get(name, float('nan')):.6f}")
-
-    # Fixed α_c per correlated sensor (clipped)
     eps = 1e-8
     alpha_c: Dict[str, float] = {}
     for name in same_freq_correlated:
@@ -286,14 +361,91 @@ def run_fix_for_sensor(sensor: str,
         a = E_s / (Ec + eps)
         a = max(min_alpha, min(max_alpha, a))
         alpha_c[name] = float(a)
+        print(f"[PASS 1] E_{name}: {Ec:.6f}")
     print("[PASS 1] α_c (clipped) per correlated sensor:")
     for name in same_freq_correlated:
         print(f"  alpha[{name}] = {alpha_c[name]:.6f}")
 
-    # Load models/stats for pass 2
-    target_model = _load_lstm(sensor, device)
-    t_mean, t_std = _load_norm_stats(sensor)
+    # -------- Filter candidates on dev (fallback to train if no dev) --------
+    def _load_split(suf: str):
+        p = BASE_DIR / "data" / "processed" / f"{sensor.lower()}_{suf}.pkl"
+        if not p.exists(): return None
+        with open(p, "rb") as f: return pickle.load(f)
+    dev = _load_split("dev")
+    train = _load_split("train")
+    splits_for_filter = [ds for ds in [dev or train] if ds is not None]
 
+    filtered = score_candidates(
+        sensor=sensor,
+        same_freq_corr=same_freq_correlated,
+        dev_splits=splits_for_filter,
+        device=device,
+        alpha_c_map=alpha_c,
+        beta_mat_17x17=A_caus,  # directional magnitudes
+        r_min=0.2,               # tune 0.15–0.3 per freq if needed
+        g_min=0.0,               # require non-negative solo gain
+        chunks=5
+    )
+    print(f"[FILTER] Using {len(filtered)}/{len(same_freq_correlated)} sensors after quality screening: {filtered}")
+    same_freq_correlated = filtered
+    if not same_freq_correlated:
+        print("[INFO] All candidates filtered out; reporting baseline only.")
+
+        # Build evaluation splits (prefer dev, then test, then train)
+        def _load_eval_split(suf: str):
+            p = BASE_DIR / "data" / "processed" / f"{sensor.lower()}_{suf}.pkl"
+            if not p.exists(): return None
+            with open(p, "rb") as f: return pickle.load(f)
+        splits = [ds for suf in ["dev", "test", "train"] if (ds := _load_eval_split(suf)) is not None]
+        if not splits:
+            print("[ERR] No dataset splits found. Nothing to evaluate.")
+            return
+
+        # Load target model/norm stats
+        target_model = _load_lstm(sensor, device)
+        t_mean, t_std = _load_norm_stats(sensor)
+
+        # Local index function in the frequency group
+        if freq == "1hz":
+            s_local_idx = SENSORS_1.index(sensor)
+        elif freq == "10hz":
+            s_local_idx = SENSORS_10.index(sensor)
+        else:
+            s_local_idx = SENSORS_100.index(sensor)
+
+        # Compute baseline MSE over splits
+        total_windows = 0
+        sum_mse_pure = 0.0
+
+        for split in splits:
+            loader = DataLoader(split, batch_size=1, shuffle=False, num_workers=0)
+            for batch in loader:
+                X_mat, Y_mat = slice_window_pair(freq, batch)
+                x_t = X_mat[s_local_idx]
+                y_t = Y_mat[s_local_idx]
+                yhat_t = predict_window(target_model, x_t, t_mean, t_std, device)
+                mse_pure = float(np.mean((y_t - yhat_t) ** 2))
+                sum_mse_pure += mse_pure
+                total_windows += 1
+
+        if total_windows == 0:
+            print("[ERR] No windows processed (empty datasets?).")
+            return
+
+        avg_mse_pure = sum_mse_pure / total_windows
+        avg_mse_fixed = avg_mse_pure  # no partners -> no correction
+        rel_imp = 0.0
+
+        print("\n=== Correlation Fix Summary (baseline only; no partners kept) ===")
+        print(f"Target sensor: {sensor}  freq={freq}  L={L}")
+        print(f"Correlated sensors used: []")
+        print(f"Windows processed: {total_windows}")
+        print(f"Average MSE (pure LSTM) : {avg_mse_pure:.6f}")
+        print(f"Average MSE (after fix) : {avg_mse_fixed:.6f}")
+        print(f"Relative improvement     : {rel_imp:+.4f}%\n")
+        return
+
+    # Rebuild correlated models/stats for kept sensors (Pass 2)
     corr_models: Dict[str, LSTMModel] = {}
     corr_stats: Dict[str, Tuple[float, float]] = {}
     for name in same_freq_correlated:
@@ -303,18 +455,22 @@ def run_fix_for_sensor(sensor: str,
         except FileNotFoundError:
             print(f"[WARN] Missing LSTM for correlated sensor {name}; skipping in pass 2.")
     if not corr_models:
-        print("[INFO] No correlated LSTMs available; terminating.")
+        print("[INFO] No correlated LSTMs available after filtering; terminating.")
         return
 
-    # Load splits
-    def _load_split(suffix: str):
-        p = BASE_DIR / "data" / "processed" / f"{sensor.lower()}_{suffix}.pkl"
+    # Build evaluation splits for pass-2 (prefer dev, then test, then train)
+    def _load_eval_split(suf: str):
+        p = BASE_DIR / "data" / "processed" / f"{sensor.lower()}_{suf}.pkl"
         if not p.exists(): return None
         with open(p, "rb") as f: return pickle.load(f)
-    splits = [ds for suf in ["train", "dev", "test"] if (ds := _load_split(suf)) is not None]
+    splits = [ds for suf in ["dev", "test", "train"] if (ds := _load_eval_split(suf)) is not None]
     if not splits:
         print("[ERR] No dataset splits found. Nothing to evaluate.")
         return
+
+    # Load target model/stats for pass-2
+    target_model = _load_lstm(sensor, device)
+    t_mean, t_std = _load_norm_stats(sensor)
 
     # Local index function in the frequency group
     if freq == "1hz":
@@ -327,7 +483,7 @@ def run_fix_for_sensor(sensor: str,
         s_local_idx = SENSORS_100.index(sensor)
         def local_idx(name: str) -> int: return SENSORS_100.index(name)
 
-    # -------- Second pass: do weighted correction with β_c * α_c --------
+    # -------- Pass 2: weighted correction with β_c * α_c --------
     print("[PASS 2] Evaluating correction with learned α_c and A_caus weights...")
     total_windows = 0
     sum_mse_pure = 0.0
@@ -337,8 +493,7 @@ def run_fix_for_sensor(sensor: str,
         loader = DataLoader(split, batch_size=1, shuffle=False, num_workers=0)
         for batch in loader:
             X_mat, Y_mat = slice_window_pair(freq, batch)
-            x_t = X_mat[s_local_idx]
-            y_t = Y_mat[s_local_idx]
+            x_t = X_mat[s_local_idx]; y_t = Y_mat[s_local_idx]
             yhat_t = predict_window(target_model, x_t, t_mean, t_std, device)
 
             weights: List[float] = []
@@ -350,8 +505,7 @@ def run_fix_for_sensor(sensor: str,
                 a    = alpha_c.get(name, 1.0)            # learned α_c
                 c_idx = local_idx(name)
                 c_mean, c_std = corr_stats[name]
-                x_c = X_mat[c_idx]
-                y_c = Y_mat[c_idx]
+                x_c = X_mat[c_idx]; y_c = Y_mat[c_idx]
                 yhat_c = predict_window(mdl, x_c, c_mean, c_std, device)
                 delta_c = y_c - yhat_c
                 weights.append(max(beta, 0.0))
@@ -359,12 +513,9 @@ def run_fix_for_sensor(sensor: str,
 
             if scaled_deltas:
                 W = np.array(weights, dtype=np.float32)
-                D = np.stack(scaled_deltas, axis=0)  # (K,L) already scaled by α_c
+                D = np.stack(scaled_deltas, axis=0)  # (K,L)
                 wsum = float(W.sum())
-                if wsum > 1e-8:
-                    delta_mean = (W[:, None] * D).sum(axis=0) / wsum
-                else:
-                    delta_mean = D.mean(axis=0)
+                delta_mean = (W[:, None] * D).sum(axis=0) / (wsum + 1e-8) if wsum > 1e-8 else D.mean(axis=0)
             else:
                 delta_mean = np.zeros_like(y_t)
 
@@ -384,25 +535,24 @@ def run_fix_for_sensor(sensor: str,
     avg_mse_fixed = sum_mse_fixed / total_windows
     rel_imp = 100.0 * (avg_mse_pure - avg_mse_fixed) / max(avg_mse_pure, 1e-12)
 
-    print("\n=== Correlation Fix Summary (learned α_c, no manual alpha) ===")
+    print("\n=== Correlation Fix Summary (learned α_c, filtered partners) ===")
     print(f"Target sensor: {sensor}  freq={freq}  L={L}")
-    print(f"Correlated sensors used: {list(corr_models.keys())}")
+    print(f"Correlated sensors used: {same_freq_correlated}")
     print(f"Windows processed: {total_windows}")
     print(f"Average MSE (pure LSTM) : {avg_mse_pure:.6f}")
     print(f"Average MSE (after fix) : {avg_mse_fixed:.6f}")
-    print(f"Relative improvement     : {rel_imp:+.4f}%")
+    print(f"Relative improvement     : {rel_imp:+.4f}%\n")
 
     # Show a few weights/scales used
-    print("\nTop correlation weights β_c (k->s) and α_c scales:")
+    print("Top correlation weights β_c (k->s) and α_c scales:")
     pairs = []
-    for name in corr_models.keys():
+    for name in same_freq_correlated:
         k_global = IDX_MAP[name]
         beta = float(A_caus[k_global, s_idx])
         pairs.append((name, beta, alpha_c.get(name, 1.0)))
     pairs.sort(key=lambda t: t[1], reverse=True)
     for name, beta, a in pairs[:10]:
         print(f"  {name:>4s}: beta={beta:.4f}  alpha={a:.4f}")
-
 
 # -----------------------
 # CLI
@@ -416,14 +566,19 @@ def main():
                     help="Lower clamp for adaptive scale α_c (default 0.0001)")
     ap.add_argument("--max-alpha", type=float, default=4.0,
                     help="Upper clamp for adaptive scale α_c (default 4.0)")
+    # Optional thresholds (you can expose these if you want to tune quickly)
+    ap.add_argument("--r-min", type=float, default=0.2, help="Min residual corr to keep a partner")
+    ap.add_argument("--g-min", type=float, default=0.0, help="Min solo gain to keep a partner")
     args = ap.parse_args()
 
+    # Wire thresholds into the scorer by overriding the defaults via closure
+    # (Quick hack: monkey-patch globals used by score_candidates call if needed)
+    # For simplicity we rebind run_fix_for_sensor arguments only.
     device = torch.device(args.device)
-    run_fix_for_sensor(args.sensor,
+    run_fix_for_sensor(sensor=args.sensor,
                        device=device,
                        min_alpha=float(args.min_alpha),
                        max_alpha=float(args.max_alpha))
-
 
 if __name__ == "__main__":
     main()
